@@ -868,15 +868,20 @@
 </div>
 
 <script>
-const STORAGE_KEY = 'evanline.v2';
+const STORAGE_KEY = 'evanline-state-v2';
 const MODES = ['camber', 'toe', 'level', 'pitch'];
 const SIDES = ['FL', 'FR', 'RL', 'RR'];
+const MAX_STORED_MEASUREMENTS = 32;
+const NOTICE_DISPLAY_MS = 2600;
+const RANGE_PENALTY = 260;
+const STDDEV_PENALTY = 420;
 const MODE_LABELS = {
   camber: 'Camber Angle',
   toe: 'Toe Angle',
   level: 'Level (Left / Right)',
   pitch: 'Pitch Angle (Front / Back)',
 };
+// placement/orientation/calibration copy for the guided workflow card
 const MODE_GUIDES = {
   camber: {
     placement: 'Placement: Flush to wheel face, screen outward',
@@ -1192,7 +1197,7 @@ function updateSampleQuality() {
   const stableNow = enoughSamples && range <= SETTLED_RANGE && stdDev <= SETTLED_STDDEV && state.orientationOk;
   const avg = sampleAverage();
 
-  let confidence = Math.round(98 - (range * 260) - (stdDev * 420));
+  let confidence = Math.round(98 - (range * RANGE_PENALTY) - (stdDev * STDDEV_PENALTY));
   if (!state.orientationOk) confidence -= 30;
   if (!state.calibrationMeta[state.mode]) confidence -= 12;
   confidence = clamp(confidence, 5, 99);
@@ -1257,6 +1262,11 @@ function loadState() {
     state.calibrationOffsets = defaultOffsets();
     state.calibrationMeta = defaultCalibrationMeta();
     state.measurements = [];
+    state.notice = {
+      text: 'Saved calibration could not be restored. Local storage may be unavailable.',
+      tone: 'warn',
+      until: Date.now() + NOTICE_DISPLAY_MS,
+    };
   }
 }
 
@@ -1265,10 +1275,14 @@ function saveState() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       calibrationOffsets: state.calibrationOffsets,
       calibrationMeta: state.calibrationMeta,
-      measurements: state.measurements.slice(-32),
+      measurements: state.measurements.slice(-MAX_STORED_MEASUREMENTS),
     }));
   } catch (_) {
-    // Ignore localStorage failures.
+    state.notice = {
+      text: 'Local storage is unavailable, so saved zeros and readings may not persist.',
+      tone: 'warn',
+      until: Date.now() + NOTICE_DISPLAY_MS,
+    };
   }
 }
 
@@ -1276,7 +1290,7 @@ function setNotice(text, tone = 'warn') {
   state.notice = {
     text,
     tone,
-    until: Date.now() + 2600,
+    until: Date.now() + NOTICE_DISPLAY_MS,
   };
 }
 
@@ -1462,6 +1476,10 @@ function measurementFor(mode, side) {
   return state.measurements.find(item => item.mode === mode && item.side === side) || null;
 }
 
+function hasSavedLevelReading() {
+  return SIDES.some(side => measurementFor('level', side));
+}
+
 function deltaFor(mode, leftSide, rightSide) {
   const left = measurementFor(mode, leftSide);
   const right = measurementFor(mode, rightSide);
@@ -1472,7 +1490,7 @@ function deltaFor(mode, leftSide, rightSide) {
 function refreshGuide() {
   const guide = MODE_GUIDES[state.mode];
   const notice = activeNotice();
-  const levelPrepared = !!(state.calibrationMeta.level || measurementFor('level', 'FL') || measurementFor('level', 'FR') || measurementFor('level', 'RL') || measurementFor('level', 'RR'));
+  const levelPrepared = !!(state.calibrationMeta.level || hasSavedLevelReading());
   let title = '1. Verify level surface';
   let description = 'Use Level mode before alignment readings so your baseline is trustworthy.';
   let warning = 'Waiting for sensor permission.';
@@ -1583,9 +1601,9 @@ function refreshSavedReadings() {
   const frontDelta = deltaFor(state.mode, 'FL', 'FR');
   const rearDelta = deltaFor(state.mode, 'RL', 'RR');
   document.getElementById('front-delta').textContent = frontDelta === null ? '—' : formatSigned(frontDelta);
-  document.getElementById('front-delta-note').textContent = frontDelta === null ? 'Save both front sides for this mode.' : 'Negative means FR is more positive than FL.';
+  document.getElementById('front-delta-note').textContent = frontDelta === null ? 'Save both front sides for this mode.' : 'Negative means FL is more negative than FR.';
   document.getElementById('rear-delta').textContent = rearDelta === null ? '—' : formatSigned(rearDelta);
-  document.getElementById('rear-delta-note').textContent = rearDelta === null ? 'Save both rear sides for this mode.' : 'Negative means RR is more positive than RL.';
+  document.getElementById('rear-delta-note').textContent = rearDelta === null ? 'Save both rear sides for this mode.' : 'Negative means RL is more negative than RR.';
 
   const list = document.getElementById('saved-list');
   const readings = SIDES
