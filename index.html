@@ -10,21 +10,20 @@
   <link rel="manifest" href="manifest.json" />
   <title>Evanline – Wheel Alignment</title>
   <style>
-    /* ── Reset & base ─────────────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
-      --bg:       #0d1117;
-      --surface:  #161b22;
-      --card:     #21262d;
-      --border:   #30363d;
-      --accent:   #58a6ff;
-      --green:    #3fb950;
-      --yellow:   #d29922;
-      --red:      #f85149;
-      --text:     #e6edf3;
-      --muted:    #8b949e;
-      --radius:   16px;
+      --bg: #0d1117;
+      --surface: #161b22;
+      --card: #21262d;
+      --border: #30363d;
+      --accent: #58a6ff;
+      --green: #3fb950;
+      --yellow: #d29922;
+      --red: #f85149;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --radius: 16px;
     }
 
     html, body {
@@ -37,7 +36,6 @@
       touch-action: manipulation;
     }
 
-    /* ── Screen system ───────────────────────────────────────────── */
     .screen {
       position: fixed;
       inset: 0;
@@ -54,7 +52,6 @@
       transform: translateY(20px);
     }
 
-    /* ── Welcome screen ──────────────────────────────────────────── */
     #screen-welcome {
       gap: 32px;
       background: var(--bg);
@@ -65,10 +62,7 @@
       align-items: center;
       gap: 12px;
     }
-    .logo-icon {
-      width: 90px;
-      height: 90px;
-    }
+    .logo-icon { width: 90px; height: 90px; }
     .logo-title {
       font-size: 32px;
       font-weight: 700;
@@ -85,10 +79,9 @@
       font-size: 15px;
       color: var(--muted);
       line-height: 1.6;
-      max-width: 300px;
+      max-width: 320px;
     }
 
-    /* ── Buttons ─────────────────────────────────────────────────── */
     .btn {
       display: inline-flex;
       align-items: center;
@@ -101,9 +94,14 @@
       padding: 14px 28px;
       cursor: pointer;
       -webkit-tap-highlight-color: transparent;
-      transition: opacity 0.15s, transform 0.1s;
+      transition: opacity 0.15s, transform 0.1s, background 0.2s, color 0.2s;
     }
     .btn:active { opacity: 0.75; transform: scale(0.97); }
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+    }
 
     .btn-primary {
       background: var(--accent);
@@ -117,26 +115,21 @@
       font-size: 14px;
     }
     .btn-small {
-      padding: 8px 18px;
-      font-size: 14px;
-      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 13px;
+      border-radius: 10px;
     }
     .btn-surface {
       background: var(--card);
       color: var(--text);
       border: 1px solid var(--border);
     }
-    .btn-danger {
-      background: var(--red);
-      color: #fff;
-    }
-    .btn-success {
-      background: var(--green);
-      color: #fff;
-    }
+    .btn-danger { background: var(--red); color: #fff; }
+    .btn-success { background: var(--green); color: #fff; }
+    .btn-warning { background: var(--yellow); color: #111; }
 
-    /* ── Main measurement screen ─────────────────────────────────── */
-    #screen-main {
+    #screen-main,
+    #screen-instructions {
       justify-content: flex-start;
       padding-top: max(env(safe-area-inset-top, 20px), 50px);
       gap: 0;
@@ -144,24 +137,23 @@
       -webkit-overflow-scrolling: touch;
     }
 
-    /* header */
-    .app-header {
+    .app-header,
+    .instr-header {
       width: 100%;
       display: flex;
       align-items: center;
       justify-content: space-between;
       padding: 0 0 16px;
+      gap: 12px;
     }
-    .app-header h1 {
-      font-size: 22px;
-      font-weight: 700;
-    }
+    .app-header h1 { font-size: 22px; font-weight: 700; }
+    .instr-header h2 { font-size: 20px; font-weight: 700; }
     .header-btns {
       display: flex;
       gap: 8px;
+      align-items: center;
     }
 
-    /* mode tabs */
     .mode-tabs {
       width: 100%;
       display: flex;
@@ -169,11 +161,11 @@
       border-radius: 12px;
       padding: 4px;
       gap: 2px;
-      margin-bottom: 20px;
+      margin-bottom: 16px;
     }
     .mode-tab {
       flex: 1;
-      padding: 8px 6px;
+      padding: 9px 6px;
       border: none;
       border-radius: 9px;
       background: transparent;
@@ -189,17 +181,16 @@
       color: #fff;
     }
 
-    /* gauge card */
     .gauge-card {
       width: 100%;
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      padding: 20px;
+      padding: 18px;
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 16px;
+      gap: 14px;
       margin-bottom: 16px;
     }
     .gauge-label {
@@ -211,13 +202,65 @@
       align-self: flex-start;
     }
 
-    /* arc gauge */
+    .guide-card {
+      align-items: stretch;
+      gap: 10px;
+    }
+    .guide-step {
+      font-size: 18px;
+      font-weight: 700;
+      line-height: 1.3;
+    }
+    .guide-text,
+    .warning-text,
+    .summary-note,
+    .saved-meta,
+    .cal-value,
+    .cal-history,
+    .step-desc,
+    .mode-card p,
+    .welcome-note {
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+    .guide-meta {
+      width: 100%;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .guide-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--text);
+    }
+    .warning-text {
+      width: 100%;
+      border-radius: 12px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      background: rgba(88, 166, 255, 0.08);
+      color: var(--text);
+    }
+    .warning-text.warn {
+      background: rgba(210, 153, 34, 0.12);
+      border-color: rgba(210, 153, 34, 0.45);
+    }
+    .warning-text.good {
+      background: rgba(63, 185, 80, 0.12);
+      border-color: rgba(63, 185, 80, 0.4);
+    }
+
     #gauge-svg {
       width: 100%;
       max-width: 300px;
     }
-
-    /* big angle readout */
     .angle-readout {
       display: flex;
       align-items: baseline;
@@ -243,122 +286,16 @@
       min-width: 80px;
       text-align: center;
     }
-
-    /* bubble level */
-    .level-wrap {
-      width: 100%;
+    .subreadout-row {
       display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 12px;
-    }
-    #bubble-canvas {
-      width: 100%;
-      max-width: 300px;
-      height: 80px;
-      display: block;
-    }
-    .level-bar-wrap {
-      width: 100%;
-      position: relative;
-    }
-    .level-bar-bg {
-      height: 10px;
-      border-radius: 5px;
-      background: var(--card);
-      border: 1px solid var(--border);
-      overflow: hidden;
-      position: relative;
-    }
-    .level-bar-fill {
-      position: absolute;
-      top: 0; bottom: 0;
-      width: 4px;
-      border-radius: 2px;
-      background: var(--accent);
-      transition: left 0.08s linear;
-    }
-    .level-center-tick {
-      position: absolute;
-      top: -4px; bottom: -4px;
-      left: 50%;
-      transform: translateX(-50%);
-      width: 2px;
-      background: var(--border);
-    }
-
-    /* status row */
-    .status-row {
-      width: 100%;
-      display: flex;
-      gap: 10px;
-      margin-bottom: 16px;
-    }
-    .status-chip {
-      flex: 1;
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 10px 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-    }
-    .status-chip-label {
-      font-size: 10px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.8px;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 8px 14px;
+      font-size: 12px;
       color: var(--muted);
-    }
-    .status-chip-value {
-      font-size: 18px;
-      font-weight: 700;
-      font-variant-numeric: tabular-nums;
-    }
-
-    /* action row */
-    .action-row {
-      width: 100%;
-      display: flex;
-      gap: 10px;
-      margin-bottom: 16px;
-    }
-    .action-row .btn {
-      flex: 1;
-    }
-
-    /* calibration card */
-    .cal-card {
-      width: 100%;
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 14px 16px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 16px;
-    }
-    .cal-info { display: flex; flex-direction: column; gap: 2px; }
-    .cal-title { font-size: 13px; font-weight: 600; }
-    .cal-value { font-size: 11px; color: var(--muted); }
-
-    /* sensor unavailable banner */
-    #sensor-banner {
-      width: 100%;
-      background: #2d1f00;
-      border: 1px solid var(--yellow);
-      border-radius: 10px;
-      padding: 12px 14px;
-      font-size: 13px;
-      color: var(--yellow);
       text-align: center;
-      margin-bottom: 16px;
     }
-    #sensor-banner.hidden { display: none; }
 
-    /* aligned indicator */
     .aligned-badge {
       display: inline-flex;
       align-items: center;
@@ -375,31 +312,214 @@
     }
     .aligned-badge.visible { opacity: 1; }
 
-    /* ── Instructions screen ─────────────────────────────────────── */
-    #screen-instructions {
-      justify-content: flex-start;
-      padding-top: max(env(safe-area-inset-top, 20px), 50px);
-      overflow-y: auto;
-      -webkit-overflow-scrolling: touch;
-      gap: 0;
-    }
-    .instr-header {
+    .level-wrap {
       width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+    #bubble-canvas {
+      width: 100%;
+      max-width: 300px;
+      height: 80px;
+      display: block;
+    }
+
+    .status-row,
+    .advanced-grid,
+    .comparison-grid,
+    .action-row,
+    .side-selector {
+      width: 100%;
+      display: grid;
+      gap: 10px;
+    }
+    .status-row,
+    .comparison-grid,
+    .advanced-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .action-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .side-selector { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+    .status-chip,
+    .comparison-item,
+    .saved-item,
+    .inline-note {
+      width: 100%;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+    }
+    .status-chip {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-height: 72px;
+    }
+    .status-chip-label,
+    .comparison-item span,
+    .advanced-label,
+    .saved-label,
+    .cal-title,
+    .step-title,
+    .mode-card h4,
+    .saved-side-title {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+    }
+    .mode-card h4 { color: var(--accent); margin-bottom: 4px; }
+    .status-chip-value,
+    .comparison-item strong,
+    .saved-value {
+      font-size: 18px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+    .status-chip-sub,
+    .comparison-item small,
+    .advanced-value,
+    .saved-meta {
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+
+    .cal-card {
+      width: 100%;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 16px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding-bottom: 20px;
+      gap: 12px;
+      margin-bottom: 16px;
     }
-    .instr-header h2 { font-size: 20px; font-weight: 700; }
-    .step-list { width: 100%; display: flex; flex-direction: column; gap: 14px; }
-    .step-item {
+    .cal-info { display: flex; flex-direction: column; gap: 4px; }
+    .cal-title { color: var(--text); }
+
+    #sensor-banner {
+      width: 100%;
+      background: #2d1f00;
+      border: 1px solid var(--yellow);
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-size: 13px;
+      color: var(--yellow);
+      text-align: center;
+      margin-bottom: 16px;
+    }
+    #sensor-banner.hidden { display: none; }
+
+    .side-btn {
+      width: 100%;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--muted);
+      border-radius: 10px;
+      padding: 10px 6px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.6px;
+    }
+    .side-btn.active {
+      background: rgba(88, 166, 255, 0.16);
+      border-color: var(--accent);
+      color: #fff;
+    }
+
+    .saved-list {
+      width: 100%;
       display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .saved-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .saved-item.empty {
+      justify-content: center;
+      text-align: center;
+      color: var(--muted);
+    }
+    .saved-side-box {
+      width: 100%;
+      padding: 12px;
+      border-radius: 12px;
+      background: rgba(88, 166, 255, 0.08);
+      border: 1px solid rgba(88, 166, 255, 0.25);
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    details.advanced-card {
+      align-items: stretch;
+      padding: 0;
+      overflow: hidden;
+    }
+    details.advanced-card summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 18px;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.6px;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    details.advanced-card summary::-webkit-details-marker { display: none; }
+    .advanced-content {
+      padding: 0 18px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .advanced-grid {
+      margin-top: 2px;
+    }
+    .advanced-item {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .mode-cal-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .instr-header { padding-bottom: 20px; }
+    .step-list,
+    .mode-card-list {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
       gap: 14px;
-      align-items: flex-start;
+    }
+    .mode-card-list { gap: 10px; margin-top: 10px; margin-bottom: 20px; }
+    .step-item,
+    .mode-card {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 12px;
       padding: 14px;
+    }
+    .step-item {
+      display: flex;
+      gap: 14px;
+      align-items: flex-start;
     }
     .step-num {
       width: 28px;
@@ -415,24 +535,6 @@
       flex-shrink: 0;
     }
     .step-body { display: flex; flex-direction: column; gap: 4px; }
-    .step-title { font-size: 14px; font-weight: 600; }
-    .step-desc { font-size: 13px; color: var(--muted); line-height: 1.5; }
-
-    .mode-card-list { width: 100%; display: flex; flex-direction: column; gap: 10px; margin-top: 10px; margin-bottom: 20px; }
-    .mode-card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 14px;
-    }
-    .mode-card h4 {
-      font-size: 14px;
-      font-weight: 600;
-      color: var(--accent);
-      margin-bottom: 4px;
-    }
-    .mode-card p { font-size: 13px; color: var(--muted); line-height: 1.5; }
-
     .instr-section-title {
       font-size: 12px;
       font-weight: 600;
@@ -444,41 +546,36 @@
       width: 100%;
     }
 
-    /* ── Misc utils ──────────────────────────────────────────────── */
-    .mt-auto { margin-top: auto; }
-    .w-full { width: 100%; }
-    .text-center { text-align: center; }
-    .divider {
-      width: 100%;
-      height: 1px;
-      background: var(--border);
-      margin: 8px 0;
-    }
-
-    /* ── Splash pulse animation ──────────────────────────────────── */
     @keyframes pulse-ring {
-      0%   { transform: scale(0.85); opacity: 0.7; }
-      50%  { transform: scale(1);    opacity: 1;   }
+      0% { transform: scale(0.85); opacity: 0.7; }
+      50% { transform: scale(1); opacity: 1; }
       100% { transform: scale(0.85); opacity: 0.7; }
     }
     .pulse { animation: pulse-ring 2.5s ease-in-out infinite; }
-
-    /* ── Needle animation ────────────────────────────────────────── */
     #gauge-needle { transition: transform 0.12s linear; will-change: transform; transform: translate3d(0,0,0); }
+
+    @media (max-width: 380px) {
+      .status-row,
+      .comparison-grid,
+      .advanced-grid,
+      .mode-cal-list,
+      .action-row,
+      .side-selector {
+        grid-template-columns: 1fr;
+      }
+      .angle-value { font-size: 58px; }
+      .app-header { align-items: flex-start; }
+    }
   </style>
 </head>
 <body>
 
-<!-- ════════════════════════════════════════════════════════════════
-     SCREEN 1 – WELCOME
-════════════════════════════════════════════════════════════════════ -->
 <div id="screen-welcome" class="screen">
   <div class="logo-wrap">
     <svg class="logo-icon pulse" viewBox="0 0 90 90" fill="none" xmlns="http://www.w3.org/2000/svg">
       <circle cx="45" cy="45" r="44" stroke="#58a6ff" stroke-width="2" />
       <circle cx="45" cy="45" r="32" stroke="#30363d" stroke-width="2" />
-      <circle cx="45" cy="45" r="8"  fill="#58a6ff" />
-      <!-- spokes -->
+      <circle cx="45" cy="45" r="8" fill="#58a6ff" />
       <line x1="45" y1="13" x2="45" y2="25" stroke="#58a6ff" stroke-width="3" stroke-linecap="round"/>
       <line x1="45" y1="65" x2="45" y2="77" stroke="#58a6ff" stroke-width="3" stroke-linecap="round"/>
       <line x1="13" y1="45" x2="25" y2="45" stroke="#58a6ff" stroke-width="3" stroke-linecap="round"/>
@@ -487,7 +584,6 @@
       <line x1="59" y1="59" x2="68" y2="68" stroke="#58a6ff" stroke-width="3" stroke-linecap="round"/>
       <line x1="68" y1="22" x2="59" y2="31" stroke="#58a6ff" stroke-width="3" stroke-linecap="round"/>
       <line x1="31" y1="59" x2="22" y2="68" stroke="#58a6ff" stroke-width="3" stroke-linecap="round"/>
-      <!-- level bubble indicator -->
       <path d="M26 58 Q45 48 64 58" stroke="#3fb950" stroke-width="2" fill="none" stroke-linecap="round"/>
     </svg>
     <div class="logo-title">Evanline</div>
@@ -495,7 +591,7 @@
   </div>
 
   <p class="welcome-desc">
-    Use your iPhone's built-in sensors to measure wheel camber, vehicle level, and surface pitch — right from Safari.
+    Use your iPhone's built-in sensors to measure wheel camber, toe, vehicle level, and pitch — with smoothing, settled detection, and saved side-by-side comparisons.
   </p>
 
   <button class="btn btn-primary" id="btn-start" onclick="startApp()">
@@ -508,82 +604,79 @@
   <button class="btn btn-ghost" onclick="showInstructions()">How to use</button>
 </div>
 
-
-<!-- ════════════════════════════════════════════════════════════════
-     SCREEN 2 – MAIN MEASUREMENT
-════════════════════════════════════════════════════════════════════ -->
 <div id="screen-main" class="screen hidden">
-
-  <!-- header -->
   <div class="app-header">
     <h1>Evanline</h1>
     <div class="header-btns">
-      <button class="btn btn-surface btn-small" onclick="showInstructions()">?</button>
-      <button class="btn btn-surface btn-small" id="btn-lock" onclick="toggleLock()" title="Lock reading">⏸</button>
+      <button class="btn btn-surface btn-small" onclick="showInstructions()">Guide</button>
+      <button class="btn btn-surface btn-small" id="btn-lock" onclick="toggleLock()" title="Lock reading">Lock</button>
     </div>
   </div>
 
-  <!-- sensor unavailable banner -->
   <div id="sensor-banner">
     ⚠️ Motion sensors not available. Please open this page in Safari on an iPhone and grant sensor access.
   </div>
 
-  <!-- mode tabs -->
   <div class="mode-tabs">
-    <button class="mode-tab active" data-mode="camber"   onclick="setMode('camber')">Camber</button>
-    <button class="mode-tab"        data-mode="toe"      onclick="setMode('toe')">Toe</button>
-    <button class="mode-tab"        data-mode="level"    onclick="setMode('level')">Level</button>
-    <button class="mode-tab"        data-mode="pitch"    onclick="setMode('pitch')">Pitch</button>
+    <button class="mode-tab active" data-mode="camber" onclick="setMode('camber')">Camber</button>
+    <button class="mode-tab" data-mode="toe" onclick="setMode('toe')">Toe</button>
+    <button class="mode-tab" data-mode="level" onclick="setMode('level')">Level</button>
+    <button class="mode-tab" data-mode="pitch" onclick="setMode('pitch')">Pitch</button>
   </div>
 
-  <!-- main gauge card -->
+  <div class="gauge-card guide-card">
+    <span class="gauge-label">Guided workflow</span>
+    <div class="guide-step" id="workflow-step-title">1. Verify level surface</div>
+    <p class="guide-text" id="workflow-step-desc">Use Level mode before alignment readings so your baseline is trustworthy.</p>
+    <div class="guide-meta">
+      <span class="guide-pill" id="guide-placement">Placement: Wheel face</span>
+      <span class="guide-pill" id="guide-orientation">Preferred: Portrait</span>
+      <span class="guide-pill" id="guide-side">Target side: FL</span>
+    </div>
+    <div class="warning-text" id="warning-text">Waiting for sensor permission.</div>
+  </div>
+
   <div class="gauge-card">
     <span class="gauge-label" id="gauge-mode-label">Camber Angle</span>
 
-    <!-- Arc gauge SVG -->
     <svg id="gauge-svg" viewBox="0 0 300 180" xmlns="http://www.w3.org/2000/svg">
       <defs>
         <linearGradient id="arcGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-          <stop offset="0%"   stop-color="#f85149"/>
-          <stop offset="50%"  stop-color="#3fb950"/>
+          <stop offset="0%" stop-color="#f85149"/>
+          <stop offset="50%" stop-color="#3fb950"/>
           <stop offset="100%" stop-color="#f85149"/>
         </linearGradient>
       </defs>
-      <!-- Background arc -->
-      <path id="gauge-bg-arc"  d="" fill="none" stroke="#21262d" stroke-width="18" stroke-linecap="round"/>
-      <!-- Colour arc -->
-      <path id="gauge-arc"     d="" fill="none" stroke="url(#arcGrad)" stroke-width="18" stroke-linecap="round" opacity="0.35"/>
-      <!-- Tick marks -->
+      <path id="gauge-bg-arc" d="" fill="none" stroke="#21262d" stroke-width="18" stroke-linecap="round"/>
+      <path id="gauge-arc" d="" fill="none" stroke="url(#arcGrad)" stroke-width="18" stroke-linecap="round" opacity="0.35"/>
       <g id="gauge-ticks" stroke="#30363d" stroke-width="1.5"></g>
-      <!-- Tick labels -->
       <g id="gauge-tick-labels" fill="#8b949e" font-size="10" text-anchor="middle" font-family="-apple-system,sans-serif"></g>
-      <!-- Needle -->
       <g id="gauge-needle" transform="rotate(0,150,168)">
         <line x1="150" y1="168" x2="150" y2="42" stroke="#58a6ff" stroke-width="2.5" stroke-linecap="round"/>
         <circle cx="150" cy="168" r="6" fill="#58a6ff"/>
         <circle cx="150" cy="168" r="3" fill="#0d1117"/>
       </g>
-      <!-- Zero marker -->
       <line id="gauge-zero" x1="150" y1="28" x2="150" y2="42" stroke="#3fb950" stroke-width="3" stroke-linecap="round"/>
-      <!-- Aligned badge area -->
       <text id="svg-aligned-text" x="150" y="162" text-anchor="middle" fill="#3fb950" font-size="11" font-family="-apple-system,sans-serif" font-weight="600" opacity="0"></text>
     </svg>
 
-    <!-- angle readout -->
-    <div style="display:flex;flex-direction:column;align-items:center;gap:4px;">
+    <div style="display:flex;flex-direction:column;align-items:center;gap:6px;">
       <div class="angle-readout">
-        <span class="angle-value" id="angle-display">0.0</span>
+        <span class="angle-value" id="angle-display">0.00</span>
         <span class="angle-unit">°</span>
       </div>
-      <span class="angle-direction" id="angle-direction"></span>
+      <span class="angle-direction" id="angle-direction">—</span>
       <div class="aligned-badge" id="aligned-badge">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-        Aligned
+        Settled &amp; aligned
+      </div>
+      <div class="subreadout-row">
+        <span id="avg-display">Avg 0.00° from 0 samples</span>
+        <span id="confidence-label">Confidence —</span>
       </div>
     </div>
   </div>
 
-  <!-- bubble level -->
   <div class="gauge-card" id="bubble-card">
     <span class="gauge-label">Visual Level</span>
     <div class="level-wrap">
@@ -591,43 +684,103 @@
     </div>
   </div>
 
-  <!-- secondary readings -->
   <div class="status-row">
     <div class="status-chip">
-      <span class="status-chip-label">Raw β</span>
-      <span class="status-chip-value" id="chip-beta">—</span>
+      <span class="status-chip-label">Stability</span>
+      <span class="status-chip-value" id="chip-stability">Waiting</span>
+      <span class="status-chip-sub" id="chip-stability-sub">Need more samples</span>
     </div>
     <div class="status-chip">
-      <span class="status-chip-label">Raw γ</span>
-      <span class="status-chip-value" id="chip-gamma">—</span>
+      <span class="status-chip-label">Confidence</span>
+      <span class="status-chip-value" id="chip-confidence">0%</span>
+      <span class="status-chip-sub" id="chip-confidence-sub">Jitter and orientation quality</span>
     </div>
     <div class="status-chip">
-      <span class="status-chip-label">Raw α</span>
-      <span class="status-chip-value" id="chip-alpha">—</span>
+      <span class="status-chip-label">Orientation</span>
+      <span class="status-chip-value" id="chip-orientation">Portrait</span>
+      <span class="status-chip-sub" id="chip-orientation-sub">Preferred for Camber</span>
+    </div>
+    <div class="status-chip">
+      <span class="status-chip-label">Calibration</span>
+      <span class="status-chip-value" id="chip-calibration">Not set</span>
+      <span class="status-chip-sub" id="chip-calibration-sub">Zero this mode first</span>
     </div>
   </div>
 
-  <!-- actions -->
   <div class="action-row">
-    <button class="btn btn-success btn-small" onclick="calibrate()">⊕ Zero / Calibrate</button>
-    <button class="btn btn-surface btn-small" onclick="resetCalibration()">↺ Reset Cal</button>
+    <button class="btn btn-success btn-small" onclick="calibrate()">Zero This Mode</button>
+    <button class="btn btn-primary btn-small" id="btn-save" onclick="saveMeasurement()">Save Avg</button>
+    <button class="btn btn-surface btn-small" id="btn-reset-cal" onclick="resetCalibration()">Reset Zero</button>
   </div>
 
-  <!-- calibration status -->
   <div class="cal-card" id="cal-card">
     <div class="cal-info">
       <span class="cal-title">Calibration Offset</span>
-      <span class="cal-value" id="cal-value-text">None — tap Zero to calibrate</span>
+      <span class="cal-value" id="cal-value-text">None — tap Zero This Mode to calibrate</span>
+      <span class="cal-history" id="cal-history-text">Saved locally per mode.</span>
     </div>
     <button class="btn btn-ghost btn-small" onclick="calibrate()">Set</button>
   </div>
 
+  <div class="gauge-card">
+    <span class="gauge-label">Saved readings</span>
+    <div class="side-selector">
+      <button class="side-btn active" data-side="FL" onclick="selectSide('FL')">FL</button>
+      <button class="side-btn" data-side="FR" onclick="selectSide('FR')">FR</button>
+      <button class="side-btn" data-side="RL" onclick="selectSide('RL')">RL</button>
+      <button class="side-btn" data-side="RR" onclick="selectSide('RR')">RR</button>
+    </div>
+    <div class="saved-side-box">
+      <span class="saved-side-title" id="saved-side-title">Camber · FL</span>
+      <strong class="saved-value" id="saved-side-value">No saved reading</strong>
+      <span class="summary-note" id="saved-side-note">Hold the phone steady until it settles, then tap Save Avg.</span>
+    </div>
+    <div class="comparison-grid">
+      <div class="comparison-item">
+        <span>Front Δ (FL − FR)</span>
+        <strong id="front-delta">—</strong>
+        <small id="front-delta-note">Save both front sides for this mode.</small>
+      </div>
+      <div class="comparison-item">
+        <span>Rear Δ (RL − RR)</span>
+        <strong id="rear-delta">—</strong>
+        <small id="rear-delta-note">Save both rear sides for this mode.</small>
+      </div>
+    </div>
+    <div class="saved-list" id="saved-list">
+      <div class="saved-item empty">No saved readings yet for this mode.</div>
+    </div>
+    <div class="inline-note">
+      Save readings per side to compare left vs right with the same phone orientation and calibration reference.
+    </div>
+  </div>
+
+  <details class="gauge-card advanced-card">
+    <summary>Advanced sensor data</summary>
+    <div class="advanced-content">
+      <div class="advanced-grid">
+        <div class="advanced-item">
+          <span class="advanced-label">Raw α</span>
+          <strong class="advanced-value" id="raw-alpha">—</strong>
+        </div>
+        <div class="advanced-item">
+          <span class="advanced-label">Raw β</span>
+          <strong class="advanced-value" id="raw-beta">—</strong>
+        </div>
+        <div class="advanced-item">
+          <span class="advanced-label">Raw γ</span>
+          <strong class="advanced-value" id="raw-gamma">—</strong>
+        </div>
+        <div class="advanced-item">
+          <span class="advanced-label">Sample spread</span>
+          <strong class="advanced-value" id="sample-spread">—</strong>
+        </div>
+      </div>
+      <div class="mode-cal-list" id="mode-cal-list"></div>
+    </div>
+  </details>
 </div>
 
-
-<!-- ════════════════════════════════════════════════════════════════
-     SCREEN 3 – INSTRUCTIONS
-════════════════════════════════════════════════════════════════════ -->
 <div id="screen-instructions" class="screen hidden">
   <div class="instr-header">
     <h2>How to Use</h2>
@@ -638,19 +791,19 @@
   <div class="mode-card-list">
     <div class="mode-card">
       <h4>Camber</h4>
-      <p>Place the phone flush against the wheel face (hub area), screen facing outward. The angle shown is the camber — tilt relative to vertical. Negative = wheels lean inward (negative camber), positive = lean outward.</p>
+      <p>Place the phone flush against the wheel face with the screen facing outward. Use portrait orientation, zero against a known reference, then wait for the reading to settle before saving each side.</p>
     </div>
     <div class="mode-card">
       <h4>Toe</h4>
-      <p>Place the phone against the inside face of the wheel, pointing forward. Rotate until one edge touches the wheel flat. The angle approximates toe-in/toe-out relative to your calibrated zero.</p>
+      <p>Use a straight edge or known straight-ahead position as your zero reference first. Then measure each side the same way and compare the saved averages instead of chasing live jitter.</p>
     </div>
     <div class="mode-card">
       <h4>Level</h4>
-      <p>Place the phone on a flat reference surface (roof, sill, hub). This shows left-right tilt — useful for ensuring your car is on level ground before aligning.</p>
+      <p>Use this first to verify the car or the floor is level. Landscape orientation is preferred for a wider bubble reference and more obvious left-right tilt.</p>
     </div>
     <div class="mode-card">
       <h4>Pitch</h4>
-      <p>Shows front-to-back pitch angle of the phone. Useful for measuring surface gradient under the car or checking caster-related tilt.</p>
+      <p>Place the phone front-to-back on a flat surface under the car. Landscape orientation helps keep the reading consistent while you wait for the sensor to settle.</p>
     </div>
   </div>
 
@@ -659,36 +812,36 @@
     <div class="step-item">
       <div class="step-num">1</div>
       <div class="step-body">
-        <span class="step-title">Park on level ground</span>
-        <span class="step-desc">Use the Level mode to verify the surface is as flat as possible before any alignment measurements.</span>
+        <span class="step-title">Verify the surface</span>
+        <span class="step-desc">Start in Level mode and make sure the car or floor is close to level before adjusting alignment settings.</span>
       </div>
     </div>
     <div class="step-item">
       <div class="step-num">2</div>
       <div class="step-body">
-        <span class="step-title">Calibrate on a known surface</span>
-        <span class="step-desc">Hold the phone on a true-level surface or in a known orientation, then tap <strong>Zero / Calibrate</strong> to set the reference to zero.</span>
+        <span class="step-title">Zero the current mode</span>
+        <span class="step-desc">Each mode keeps its own calibration. Use <strong>Zero This Mode</strong> on a known reference so you do not lose your other zero points.</span>
       </div>
     </div>
     <div class="step-item">
       <div class="step-num">3</div>
       <div class="step-body">
-        <span class="step-title">Measure each wheel</span>
-        <span class="step-desc">In <strong>Camber</strong> mode, hold the phone flat against the wheel face with screen outward. Read the angle. Typical spec: −0.5° to −1.5° for most vehicles.</span>
+        <span class="step-title">Match the preferred orientation</span>
+        <span class="step-desc">Camber and Toe prefer portrait. Level and Pitch prefer landscape. Rotate the phone until the orientation chip shows a match.</span>
       </div>
     </div>
     <div class="step-item">
       <div class="step-num">4</div>
       <div class="step-body">
-        <span class="step-title">Use Lock to hold a reading</span>
-        <span class="step-desc">Tap the <strong>⏸</strong> button to freeze the current reading so you can note it down.</span>
+        <span class="step-title">Wait for Settled</span>
+        <span class="step-desc">The app smooths the sensor feed and watches recent sample spread. Save readings only after stability turns to <strong>Settled</strong>.</span>
       </div>
     </div>
     <div class="step-item">
       <div class="step-num">5</div>
       <div class="step-body">
-        <span class="step-title">Compare and adjust</span>
-        <span class="step-desc">Compare front-left vs front-right (or rear-left vs rear-right). Adjust tie rods (toe) or control arm bolts (camber) as appropriate. Recheck each time.</span>
+        <span class="step-title">Save and compare sides</span>
+        <span class="step-desc">Pick FL, FR, RL, or RR, then tap <strong>Save Avg</strong>. Evanline stores readings locally and shows front/rear deltas for the active mode.</span>
       </div>
     </div>
   </div>
@@ -699,14 +852,14 @@
       <div class="step-num" style="background:var(--yellow)">!</div>
       <div class="step-body">
         <span class="step-title">Consumer-grade accuracy</span>
-        <span class="step-desc">Phone sensors are consumer-grade (±0.1°–0.5° typical). Results are indicative and suitable for DIY reference. Professional alignment requires a calibrated laser rack.</span>
+        <span class="step-desc">Phone sensors typically land around ±0.1°–0.5°. Averaging and settled detection improve repeatability, but a calibrated laser rack is still the professional standard.</span>
       </div>
     </div>
     <div class="step-item">
       <div class="step-num" style="background:var(--yellow)">!</div>
       <div class="step-body">
-        <span class="step-title">Safari on iOS required</span>
-        <span class="step-desc">Motion sensors require Safari on iPhone (iOS 13+). You must tap "Enable Sensors" and grant permission in the dialog that appears.</span>
+        <span class="step-title">Safari on iPhone required</span>
+        <span class="step-desc">Motion sensors require Safari on iPhone (iOS 13+). You must tap “Enable Sensors &amp; Start” and approve the permission prompt.</span>
       </div>
     </div>
   </div>
@@ -714,37 +867,96 @@
   <div style="height:40px;"></div>
 </div>
 
-
 <script>
-/* ════════════════════════════════════════════════════════════════════
-   EVANLINE – Wheel Alignment
-   Original work. Uses W3C DeviceOrientation API (public spec).
-════════════════════════════════════════════════════════════════════ */
+const STORAGE_KEY = 'evanline.v2';
+const MODES = ['camber', 'toe', 'level', 'pitch'];
+const SIDES = ['FL', 'FR', 'RL', 'RR'];
+const MODE_LABELS = {
+  camber: 'Camber Angle',
+  toe: 'Toe Angle',
+  level: 'Level (Left / Right)',
+  pitch: 'Pitch Angle (Front / Back)',
+};
+const MODE_GUIDES = {
+  camber: {
+    placement: 'Placement: Flush to wheel face, screen outward',
+    orientation: 'Portrait',
+    calibration: 'Zero against a known vertical or repeatable reference before reading camber.',
+  },
+  toe: {
+    placement: 'Placement: Against wheel or straight edge, pointing forward',
+    orientation: 'Portrait',
+    calibration: 'Zero against a straight-ahead reference before comparing left and right toe.',
+  },
+  level: {
+    placement: 'Placement: On a flat sill, roof, or hub surface',
+    orientation: 'Landscape',
+    calibration: 'Zero on a confirmed level surface if you need a relative reference.',
+  },
+  pitch: {
+    placement: 'Placement: Front-to-back on a flat reference surface',
+    orientation: 'Landscape',
+    calibration: 'Zero on a known flat reference before checking pitch or driveway slope.',
+  },
+};
+const CX = 150, CY = 168, R = 126;
+const START_DEG = -180, END_DEG = 0;
+const GAUGE_RANGE = 30;
+const ALIGNED_THRESHOLD = 0.3;
+const SMOOTHING_ALPHA = 0.22;
+const SAMPLE_WINDOW = 12;
+const MIN_SAMPLE_COUNT = 6;
+const SETTLED_RANGE = 0.18;
+const SETTLED_STDDEV = 0.08;
+const SETTLED_HOLD_MS = 900;
 
-// ── State ─────────────────────────────────────────────────────────
 const state = {
-  mode: 'camber',        // 'camber' | 'toe' | 'level' | 'pitch'
+  mode: 'camber',
   alpha: 0,
   beta: 0,
   gamma: 0,
-  calOffset: 0,          // subtracted from active axis value
+  smoothed: { alpha: null, beta: null, gamma: null },
+  calibrationOffsets: defaultOffsets(),
+  calibrationMeta: defaultCalibrationMeta(),
+  sampleBuffer: [],
+  confidence: 0,
+  settled: false,
+  settledStart: 0,
+  aligned: false,
+  alignedStart: 0,
   locked: false,
   sensorsAvailable: false,
+  sensorListenerAttached: false,
   prevScreen: null,
+  selectedSide: 'FL',
+  measurements: [],
+  screenOrientation: 'portrait',
+  orientationOk: true,
+  notice: null,
 };
 
-// ── Gauge geometry ────────────────────────────────────────────────
-const CX = 150, CY = 168, R = 126;
-const START_DEG = -180, END_DEG = 0; // half-circle, bottom-oriented
-const GAUGE_RANGE = 30;        // ±30° display range — wide enough for worst-case misalignment yet precise for typical ±2° specs
-const ALIGNED_THRESHOLD = 0.3; // degrees: conservatively above sensor noise floor (±0.1°–0.5°) to avoid false "aligned" flicker
+function defaultOffsets() {
+  return { camber: 0, toe: 0, level: 0, pitch: 0 };
+}
 
-function degToRad(d) { return d * Math.PI / 180; }
+function defaultCalibrationMeta() {
+  return { camber: null, toe: null, level: null, pitch: null };
+}
 
-function clampAngle(angle) { return Math.max(-GAUGE_RANGE, Math.min(GAUGE_RANGE, angle)); }
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function degToRad(d) {
+  return d * Math.PI / 180;
+}
+
+function clampAngle(angle) {
+  return clamp(angle, -GAUGE_RANGE, GAUGE_RANGE);
+}
 
 function polarPoint(cx, cy, r, angleDeg) {
-  const rad = degToRad(angleDeg - 90); // -90 so 0° is top
+  const rad = degToRad(angleDeg - 90);
   return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
 }
 
@@ -756,63 +968,67 @@ function buildArcPath(cx, cy, r, startDeg, endDeg) {
 }
 
 function initGaugeSVG() {
-  const bgArc  = document.getElementById('gauge-bg-arc');
+  const bgArc = document.getElementById('gauge-bg-arc');
   const colArc = document.getElementById('gauge-arc');
-  const ticks  = document.getElementById('gauge-ticks');
+  const ticks = document.getElementById('gauge-ticks');
   const labels = document.getElementById('gauge-tick-labels');
-
   const path = buildArcPath(CX, CY, R, START_DEG, END_DEG);
+
   bgArc.setAttribute('d', path);
   colArc.setAttribute('d', path);
-
-  // tick marks every 5°, label every 10°
   ticks.innerHTML = '';
   labels.innerHTML = '';
+
   for (let v = -GAUGE_RANGE; v <= GAUGE_RANGE; v += 5) {
-    const angleDeg = (v / GAUGE_RANGE) * 90; // map ±30° to ±90° arc
     const outer = polarPoint(CX, CY, R + 10, START_DEG + (v + GAUGE_RANGE) / (2 * GAUGE_RANGE) * 180);
     const inner = polarPoint(CX, CY, R - 10, START_DEG + (v + GAUGE_RANGE) / (2 * GAUGE_RANGE) * 180);
     const isMajor = v % 10 === 0;
-
     const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-    line.setAttribute('x1', outer.x); line.setAttribute('y1', outer.y);
-    line.setAttribute('x2', inner.x); line.setAttribute('y2', inner.y);
+    line.setAttribute('x1', outer.x);
+    line.setAttribute('y1', outer.y);
+    line.setAttribute('x2', inner.x);
+    line.setAttribute('y2', inner.y);
     line.setAttribute('stroke-width', isMajor ? '2' : '1');
     ticks.appendChild(line);
 
     if (isMajor) {
-      const lp = polarPoint(CX, CY, R + 22, START_DEG + (v + GAUGE_RANGE) / (2 * GAUGE_RANGE) * 180);
+      const labelPoint = polarPoint(CX, CY, R + 22, START_DEG + (v + GAUGE_RANGE) / (2 * GAUGE_RANGE) * 180);
       const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-      text.setAttribute('x', lp.x); text.setAttribute('y', lp.y + 4);
+      text.setAttribute('x', labelPoint.x);
+      text.setAttribute('y', labelPoint.y + 4);
       text.textContent = v === 0 ? '0' : (v > 0 ? `+${v}` : `${v}`);
       labels.appendChild(text);
     }
   }
 }
 
-// ── Bubble level canvas ───────────────────────────────────────────
 function drawBubble(angle) {
   const canvas = document.getElementById('bubble-canvas');
   if (!canvas) return;
+
   const ctx = canvas.getContext('2d');
-  const W = canvas.width, H = canvas.height;
-  const mx = W / 2, my = H / 2;
-  const tubeW = W - 32, tubeH = 34, tubeR = tubeH / 2;
-  const tx = 16, ty = my - tubeR;
+  const W = canvas.width;
+  const H = canvas.height;
+  const mx = W / 2;
+  const my = H / 2;
+  const tubeW = W - 32;
+  const tubeH = 34;
+  const tubeR = tubeH / 2;
+  const tx = 16;
+  const ty = my - tubeR;
 
   ctx.clearRect(0, 0, W, H);
 
-  // tube background
   ctx.beginPath();
-  const r = tubeR;
-  ctx.moveTo(tx + r, ty); ctx.lineTo(tx + tubeW - r, ty);
-  ctx.arcTo(tx + tubeW, ty, tx + tubeW, ty + tubeH, r);
-  ctx.lineTo(tx + tubeW, ty + tubeH - r);
-  ctx.arcTo(tx + tubeW, ty + tubeH, tx + tubeW - r, ty + tubeH, r);
-  ctx.lineTo(tx + r, ty + tubeH);
-  ctx.arcTo(tx, ty + tubeH, tx, ty + tubeH - r, r);
-  ctx.lineTo(tx, ty + r);
-  ctx.arcTo(tx, ty, tx + r, ty, r);
+  ctx.moveTo(tx + tubeR, ty);
+  ctx.lineTo(tx + tubeW - tubeR, ty);
+  ctx.arcTo(tx + tubeW, ty, tx + tubeW, ty + tubeH, tubeR);
+  ctx.lineTo(tx + tubeW, ty + tubeH - tubeR);
+  ctx.arcTo(tx + tubeW, ty + tubeH, tx + tubeW - tubeR, ty + tubeH, tubeR);
+  ctx.lineTo(tx + tubeR, ty + tubeH);
+  ctx.arcTo(tx, ty + tubeH, tx, ty + tubeH - tubeR, tubeR);
+  ctx.lineTo(tx, ty + tubeR);
+  ctx.arcTo(tx, ty, tx + tubeR, ty, tubeR);
   ctx.closePath();
   ctx.fillStyle = '#21262d';
   ctx.fill();
@@ -820,181 +1036,314 @@ function drawBubble(angle) {
   ctx.lineWidth = 1.5;
   ctx.stroke();
 
-  // centre dashed lines
   ctx.setLineDash([4, 4]);
   ctx.strokeStyle = '#30363d';
   ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(mx, ty + 4); ctx.lineTo(mx, ty + tubeH - 4); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(mx, ty + 4);
+  ctx.lineTo(mx, ty + tubeH - 4);
+  ctx.stroke();
   ctx.setLineDash([]);
 
-  // clamp bubble position to tube
   const clampedAngle = clampAngle(angle);
   const bubbleX = mx - (clampedAngle / GAUGE_RANGE) * (tubeW / 2 - tubeR - 2);
   const bubbleR = 12;
-
-  // bubble glow
   const isLevel = Math.abs(angle) < 0.5;
   const bubbleColour = isLevel ? '#3fb950' : (Math.abs(angle) < 3 ? '#d29922' : '#f85149');
+  const gradient = ctx.createRadialGradient(bubbleX - 3, my - 4, 2, bubbleX, my, bubbleR);
 
-  const grd = ctx.createRadialGradient(bubbleX - 3, my - 4, 2, bubbleX, my, bubbleR);
-  grd.addColorStop(0, 'rgba(255,255,255,0.35)');
-  grd.addColorStop(1, bubbleColour + 'aa');
+  gradient.addColorStop(0, 'rgba(255,255,255,0.35)');
+  gradient.addColorStop(1, bubbleColour + 'aa');
+
   ctx.beginPath();
   ctx.arc(bubbleX, my, bubbleR, 0, Math.PI * 2);
-  ctx.fillStyle = grd;
+  ctx.fillStyle = gradient;
   ctx.fill();
   ctx.strokeStyle = bubbleColour;
   ctx.lineWidth = 2;
   ctx.stroke();
 
-  // angle text below tube
   ctx.fillStyle = '#8b949e';
   ctx.font = '11px -apple-system, sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText(angle.toFixed(2) + '°', mx, ty + tubeH + 16);
+  ctx.fillText(`${formatNumber(angle)}°`, mx, ty + tubeH + 16);
 }
 
-// ── Needle update ─────────────────────────────────────────────────
 function updateNeedle(angleDeg) {
-  const needle = document.getElementById('gauge-needle');
-  // map angle to rotation: 0° → straight up (0 rot), ±GAUGE_RANGE → ±90°
   const clampedAngle = clampAngle(angleDeg);
   const rotDeg = (clampedAngle / GAUGE_RANGE) * 90;
-  needle.setAttribute('transform', `rotate(${rotDeg},${CX},${CY})`);
-
+  const needle = document.getElementById('gauge-needle');
   const display = document.getElementById('angle-display');
-  const direction = document.getElementById('angle-direction');
   const badge = document.getElementById('aligned-badge');
   const svgText = document.getElementById('svg-aligned-text');
-
-  display.textContent = Math.abs(angleDeg).toFixed(2);
-
-  // colour code
   const abs = Math.abs(angleDeg);
-  if (abs < ALIGNED_THRESHOLD) {
+
+  needle.setAttribute('transform', `rotate(${rotDeg},${CX},${CY})`);
+  display.textContent = formatNumber(abs);
+
+  if (state.aligned) {
     display.style.color = 'var(--green)';
     badge.classList.add('visible');
     svgText.setAttribute('opacity', '1');
-    svgText.textContent = '● ALIGNED';
+    svgText.textContent = '● SETTLED + ALIGNED';
   } else {
     badge.classList.remove('visible');
     svgText.setAttribute('opacity', '0');
     svgText.textContent = '';
-    if (abs < 1.5)      display.style.color = 'var(--text)';
-    else if (abs < 3)   display.style.color = 'var(--yellow)';
-    else                display.style.color = 'var(--red)';
+    if (abs < 1.5) display.style.color = 'var(--text)';
+    else if (abs < 3) display.style.color = 'var(--yellow)';
+    else display.style.color = 'var(--red)';
   }
 
-  // direction labels per mode
-  const mode = state.mode;
-  if (mode === 'camber') {
-    direction.textContent = angleDeg > 0.15 ? '▲ Positive Camber' : angleDeg < -0.15 ? '▼ Negative Camber' : '— Zero Camber';
-  } else if (mode === 'toe') {
-    direction.textContent = angleDeg > 0.15 ? '→ Toe Out' : angleDeg < -0.15 ? '← Toe In' : '— Neutral';
-  } else if (mode === 'level') {
-    direction.textContent = angleDeg > 0.15 ? '↗ Tilts Right' : angleDeg < -0.15 ? '↖ Tilts Left' : '— Level';
+  document.getElementById('angle-direction').textContent = directionLabel(angleDeg);
+}
+
+function directionLabel(angleDeg) {
+  if (state.mode === 'camber') {
+    return angleDeg > 0.15 ? '▲ Positive Camber' : angleDeg < -0.15 ? '▼ Negative Camber' : '— Zero Camber';
+  }
+  if (state.mode === 'toe') {
+    return angleDeg > 0.15 ? '→ Toe Out' : angleDeg < -0.15 ? '← Toe In' : '— Neutral';
+  }
+  if (state.mode === 'level') {
+    return angleDeg > 0.15 ? '↗ Tilts Right' : angleDeg < -0.15 ? '↖ Tilts Left' : '— Level';
+  }
+  return angleDeg > 0.15 ? '↑ Nose Up' : angleDeg < -0.15 ? '↓ Nose Down' : '— Flat';
+}
+
+function formatNumber(value) {
+  return Number.isFinite(value) ? value.toFixed(2) : '0.00';
+}
+
+function formatSigned(value) {
+  if (!Number.isFinite(value)) return '—';
+  const sign = value > 0 ? '+' : '';
+  return `${sign}${value.toFixed(2)}°`;
+}
+
+function formatTime(isoString) {
+  if (!isoString) return '—';
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function currentOrientation() {
+  return window.innerWidth > window.innerHeight ? 'landscape' : 'portrait';
+}
+
+function preferredOrientation(mode = state.mode) {
+  return (mode === 'camber' || mode === 'toe') ? 'portrait' : 'landscape';
+}
+
+function orientationLabel(value) {
+  return value === 'landscape' ? 'Landscape' : 'Portrait';
+}
+
+function rawAngleForMode(mode = state.mode, source = state.smoothed) {
+  const bank = source || state;
+  const axis = mode === 'pitch' ? 'beta' : 'gamma';
+  const value = bank[axis];
+  return Number.isFinite(value) ? value : 0;
+}
+
+function calibratedAngle(mode = state.mode) {
+  return rawAngleForMode(mode) - (state.calibrationOffsets[mode] || 0);
+}
+
+function sampleAverage() {
+  if (!state.sampleBuffer.length) return calibratedAngle();
+  return state.sampleBuffer.reduce((sum, value) => sum + value, 0) / state.sampleBuffer.length;
+}
+
+function sampleRange() {
+  if (!state.sampleBuffer.length) return 0;
+  return Math.max(...state.sampleBuffer) - Math.min(...state.sampleBuffer);
+}
+
+function sampleStdDev() {
+  if (!state.sampleBuffer.length) return 0;
+  const avg = sampleAverage();
+  const variance = state.sampleBuffer.reduce((sum, value) => sum + Math.pow(value - avg, 2), 0) / state.sampleBuffer.length;
+  return Math.sqrt(variance);
+}
+
+function resetLiveAveraging() {
+  state.sampleBuffer = [];
+  state.confidence = 0;
+  state.settled = false;
+  state.settledStart = 0;
+  state.aligned = false;
+  state.alignedStart = 0;
+}
+
+function pushSample(value) {
+  state.sampleBuffer.push(value);
+  if (state.sampleBuffer.length > SAMPLE_WINDOW) {
+    state.sampleBuffer.shift();
+  }
+}
+
+function updateSampleQuality() {
+  const now = Date.now();
+  const range = sampleRange();
+  const stdDev = sampleStdDev();
+  const enoughSamples = state.sampleBuffer.length >= MIN_SAMPLE_COUNT;
+  const stableNow = enoughSamples && range <= SETTLED_RANGE && stdDev <= SETTLED_STDDEV && state.orientationOk;
+  const avg = sampleAverage();
+
+  let confidence = Math.round(98 - (range * 260) - (stdDev * 420));
+  if (!state.orientationOk) confidence -= 30;
+  if (!state.calibrationMeta[state.mode]) confidence -= 12;
+  confidence = clamp(confidence, 5, 99);
+
+  if (stableNow) {
+    if (!state.settledStart) state.settledStart = now;
   } else {
-    direction.textContent = angleDeg > 0.15 ? '↑ Nose Up' : angleDeg < -0.15 ? '↓ Nose Down' : '— Flat';
+    state.settledStart = 0;
+    state.alignedStart = 0;
+  }
+
+  state.settled = stableNow && (now - state.settledStart >= SETTLED_HOLD_MS);
+
+  const alignedNow = state.settled && Math.abs(avg) <= ALIGNED_THRESHOLD;
+  if (alignedNow) {
+    if (!state.alignedStart) state.alignedStart = now;
+  } else {
+    state.alignedStart = 0;
+  }
+
+  state.aligned = alignedNow && (now - state.alignedStart >= 500);
+  state.confidence = confidence;
+}
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    const offsets = defaultOffsets();
+    MODES.forEach(mode => {
+      const value = parsed?.calibrationOffsets?.[mode];
+      offsets[mode] = Number.isFinite(value) ? value : 0;
+    });
+    const meta = defaultCalibrationMeta();
+    MODES.forEach(mode => {
+      const item = parsed?.calibrationMeta?.[mode];
+      if (item && Number.isFinite(item.offset) && typeof item.time === 'string') {
+        meta[mode] = {
+          offset: item.offset,
+          time: item.time,
+          orientation: item.orientation === 'landscape' ? 'landscape' : 'portrait',
+        };
+      }
+    });
+
+    const measurements = Array.isArray(parsed?.measurements) ? parsed.measurements : [];
+    state.calibrationOffsets = offsets;
+    state.calibrationMeta = meta;
+    state.measurements = measurements
+      .filter(item => MODES.includes(item.mode) && SIDES.includes(item.side) && Number.isFinite(item.value))
+      .map(item => ({
+        id: `${item.mode}-${item.side}`,
+        mode: item.mode,
+        side: item.side,
+        value: Number(item.value),
+        confidence: Number.isFinite(item.confidence) ? item.confidence : 0,
+        samples: Number.isFinite(item.samples) ? item.samples : 0,
+        time: typeof item.time === 'string' ? item.time : new Date().toISOString(),
+      }));
+  } catch (_) {
+    state.calibrationOffsets = defaultOffsets();
+    state.calibrationMeta = defaultCalibrationMeta();
+    state.measurements = [];
   }
 }
 
-// ── Active angle value for current mode ──────────────────────────
-// Camber, Toe, and Level all read from gamma (left-right tilt).
-// Pitch reads from beta (front-back tilt).
-function activeAngle() {
-  const raw = state.mode === 'pitch' ? state.beta : state.gamma;
-  return raw - state.calOffset;
+function saveState() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      calibrationOffsets: state.calibrationOffsets,
+      calibrationMeta: state.calibrationMeta,
+      measurements: state.measurements.slice(-32),
+    }));
+  } catch (_) {
+    // Ignore localStorage failures.
+  }
 }
 
-// ── Device orientation handler ────────────────────────────────────
+function setNotice(text, tone = 'warn') {
+  state.notice = {
+    text,
+    tone,
+    until: Date.now() + 2600,
+  };
+}
+
+function activeNotice() {
+  if (!state.notice) return null;
+  if (Date.now() > state.notice.until) {
+    state.notice = null;
+    return null;
+  }
+  return state.notice;
+}
+
+function attachSensorListener() {
+  if (state.sensorListenerAttached) return;
+  window.addEventListener('deviceorientation', onOrientation, true);
+  state.sensorListenerAttached = true;
+}
+
 function onOrientation(event) {
   if (state.locked) return;
 
-  state.alpha = event.alpha ?? 0;
-  state.beta  = event.beta  ?? 0;
-  state.gamma = event.gamma ?? 0;
+  state.alpha = Number.isFinite(event.alpha) ? event.alpha : 0;
+  state.beta = Number.isFinite(event.beta) ? event.beta : 0;
+  state.gamma = Number.isFinite(event.gamma) ? event.gamma : 0;
 
-  document.getElementById('chip-alpha').textContent = state.alpha.toFixed(1) + '°';
-  document.getElementById('chip-beta').textContent  = state.beta.toFixed(1)  + '°';
-  document.getElementById('chip-gamma').textContent = state.gamma.toFixed(1) + '°';
-
-  const angle = activeAngle();
-  updateNeedle(angle);
-  drawBubble(angle);
-}
-
-// ── Mode switching ────────────────────────────────────────────────
-const modeLabels = {
-  camber: 'Camber Angle',
-  toe:    'Toe Angle',
-  level:  'Level (Left / Right)',
-  pitch:  'Pitch Angle (Front / Back)',
-};
-
-function setMode(mode) {
-  state.mode = mode;
-  state.calOffset = 0;
-  document.querySelectorAll('.mode-tab').forEach(t => {
-    t.classList.toggle('active', t.dataset.mode === mode);
+  ['alpha', 'beta', 'gamma'].forEach(axis => {
+    const next = state[axis];
+    const prev = state.smoothed[axis];
+    state.smoothed[axis] = prev === null ? next : prev + (next - prev) * SMOOTHING_ALPHA;
   });
-  document.getElementById('gauge-mode-label').textContent = modeLabels[mode] || mode;
-  document.getElementById('cal-value-text').textContent = 'None — tap Zero to calibrate';
-  updateNeedle(activeAngle());
-  drawBubble(activeAngle());
+
+  state.screenOrientation = currentOrientation();
+  state.orientationOk = state.screenOrientation === preferredOrientation();
+
+  pushSample(calibratedAngle());
+  updateSampleQuality();
+  refreshUI();
 }
 
-// ── Calibration ───────────────────────────────────────────────────
-function calibrate() {
-  const raw = state.mode === 'pitch' ? state.beta : state.gamma;
-  state.calOffset = raw;
-  const text = `Offset: ${raw.toFixed(2)}°`;
-  document.getElementById('cal-value-text').textContent = text;
-  updateNeedle(activeAngle());
-  drawBubble(activeAngle());
-}
-
-function resetCalibration() {
-  state.calOffset = 0;
-  document.getElementById('cal-value-text').textContent = 'None — tap Zero to calibrate';
-}
-
-// ── Lock / freeze reading ─────────────────────────────────────────
-function toggleLock() {
-  state.locked = !state.locked;
-  const btn = document.getElementById('btn-lock');
-  btn.textContent = state.locked ? '▶' : '⏸';
-  btn.style.background = state.locked ? 'var(--yellow)' : '';
-  btn.style.color       = state.locked ? '#000'          : '';
-}
-
-// ── Sensor permission (iOS 13+) ───────────────────────────────────
 function requestSensors(callback) {
-  if (typeof DeviceOrientationEvent !== 'undefined' &&
-      typeof DeviceOrientationEvent.requestPermission === 'function') {
-    // iOS 13+
+  if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
     DeviceOrientationEvent.requestPermission()
       .then(response => {
         if (response === 'granted') {
-          window.addEventListener('deviceorientation', onOrientation, true);
+          attachSensorListener();
           state.sensorsAvailable = true;
           hideSensorBanner();
         } else {
           showSensorBanner();
         }
+        refreshUI();
         if (callback) callback(response === 'granted');
       })
       .catch(() => {
         showSensorBanner();
+        refreshUI();
         if (callback) callback(false);
       });
   } else if (typeof DeviceOrientationEvent !== 'undefined') {
-    // Android / older Safari — no permission needed
-    window.addEventListener('deviceorientation', onOrientation, true);
+    attachSensorListener();
     state.sensorsAvailable = true;
     hideSensorBanner();
+    refreshUI();
     if (callback) callback(true);
   } else {
     showSensorBanner();
+    refreshUI();
     if (callback) callback(false);
   }
 }
@@ -1002,24 +1351,24 @@ function requestSensors(callback) {
 function showSensorBanner() {
   document.getElementById('sensor-banner').classList.remove('hidden');
 }
+
 function hideSensorBanner() {
   document.getElementById('sensor-banner').classList.add('hidden');
 }
 
-// ── Screen navigation ─────────────────────────────────────────────
 function showScreen(id) {
-  document.querySelectorAll('.screen').forEach(s => {
-    s.classList.toggle('hidden', s.id !== id);
+  document.querySelectorAll('.screen').forEach(screen => {
+    screen.classList.toggle('hidden', screen.id !== id);
   });
 }
 
 function startApp() {
-  // requestPermission must be inside a user gesture handler
   requestSensors(ok => {
     showScreen('screen-main');
     initGaugeSVG();
-    drawBubble(0);
+    drawBubble(sampleAverage());
     if (!ok) showSensorBanner();
+    refreshUI();
   });
 }
 
@@ -1032,10 +1381,275 @@ function backFromInstructions() {
   showScreen(state.prevScreen || 'screen-welcome');
 }
 
-// ── Init ──────────────────────────────────────────────────────────
+function selectSide(side) {
+  state.selectedSide = side;
+  refreshUI();
+}
+
+function setMode(mode) {
+  state.mode = mode;
+  state.screenOrientation = currentOrientation();
+  state.orientationOk = state.screenOrientation === preferredOrientation(mode);
+  resetLiveAveraging();
+  document.querySelectorAll('.mode-tab').forEach(tab => {
+    tab.classList.toggle('active', tab.dataset.mode === mode);
+  });
+  refreshUI();
+}
+
+function calibrate() {
+  const raw = rawAngleForMode();
+  state.calibrationOffsets[state.mode] = raw;
+  state.calibrationMeta[state.mode] = {
+    offset: raw,
+    time: new Date().toISOString(),
+    orientation: state.screenOrientation,
+  };
+  resetLiveAveraging();
+  saveState();
+  setNotice(`${MODE_LABELS[state.mode]} zeroed and saved locally.`, 'good');
+  refreshUI();
+}
+
+function resetCalibration() {
+  state.calibrationOffsets[state.mode] = 0;
+  state.calibrationMeta[state.mode] = null;
+  resetLiveAveraging();
+  saveState();
+  setNotice(`${MODE_LABELS[state.mode]} calibration reset.`, 'warn');
+  refreshUI();
+}
+
+function toggleLock() {
+  state.locked = !state.locked;
+  if (!state.locked) {
+    resetLiveAveraging();
+  }
+  setNotice(state.locked ? 'Reading locked. Save the average or tap Resume Live.' : 'Live reading resumed.', state.locked ? 'good' : 'warn');
+  refreshUI();
+}
+
+function saveMeasurement() {
+  if (!state.sampleBuffer.length) {
+    setNotice('Wait for a few sensor samples before saving.', 'warn');
+    refreshUI();
+    return;
+  }
+  if (!state.settled) {
+    setNotice('Hold the phone steady until the reading settles before saving.', 'warn');
+    refreshUI();
+    return;
+  }
+
+  const measurement = {
+    id: `${state.mode}-${state.selectedSide}`,
+    mode: state.mode,
+    side: state.selectedSide,
+    value: Number(sampleAverage().toFixed(2)),
+    confidence: state.confidence,
+    samples: state.sampleBuffer.length,
+    time: new Date().toISOString(),
+  };
+
+  state.measurements = state.measurements.filter(item => !(item.mode === measurement.mode && item.side === measurement.side));
+  state.measurements.push(measurement);
+  saveState();
+  setNotice(`Saved averaged ${state.mode} reading for ${state.selectedSide}.`, 'good');
+  refreshUI();
+}
+
+function measurementFor(mode, side) {
+  return state.measurements.find(item => item.mode === mode && item.side === side) || null;
+}
+
+function deltaFor(mode, leftSide, rightSide) {
+  const left = measurementFor(mode, leftSide);
+  const right = measurementFor(mode, rightSide);
+  if (!left || !right) return null;
+  return left.value - right.value;
+}
+
+function refreshGuide() {
+  const guide = MODE_GUIDES[state.mode];
+  const notice = activeNotice();
+  const levelPrepared = !!(state.calibrationMeta.level || measurementFor('level', 'FL') || measurementFor('level', 'FR') || measurementFor('level', 'RL') || measurementFor('level', 'RR'));
+  let title = '1. Verify level surface';
+  let description = 'Use Level mode before alignment readings so your baseline is trustworthy.';
+  let warning = 'Waiting for sensor permission.';
+  let tone = 'warn';
+
+  if (!state.sensorsAvailable) {
+    warning = 'Enable motion access in Safari to begin measuring.';
+  } else if (notice) {
+    warning = notice.text;
+    tone = notice.tone;
+  } else if (!levelPrepared && state.mode !== 'level') {
+    warning = 'Switch to Level mode and confirm the floor or car is level before alignment readings.';
+  } else if (!state.calibrationMeta[state.mode]) {
+    title = '2. Set a zero reference';
+    description = guide.calibration;
+    warning = 'This mode is not zeroed yet. Zero it on a known reference for better repeatability.';
+  } else if (!state.orientationOk) {
+    title = `3. Rotate to ${guide.orientation}`;
+    description = `For ${MODE_LABELS[state.mode]}, ${guide.orientation.toLowerCase()} orientation gives a more repeatable placement.`;
+    warning = `Current orientation is ${orientationLabel(state.screenOrientation)}. Rotate to ${guide.orientation}.`;
+  } else if (!state.settled) {
+    title = '4. Hold steady';
+    description = 'The app is averaging recent samples. Keep the phone planted and avoid hand movement until stability turns to Settled.';
+    warning = 'Movement or jitter is still above the settled threshold.';
+  } else {
+    title = '5. Save the averaged reading';
+    description = `Reading is settled. Lock it if needed, then save the averaged ${state.mode} value for ${state.selectedSide}.`;
+    warning = 'Consumer-grade sensors are best for repeatable DIY checks, not certified rack alignment.';
+    tone = 'good';
+  }
+
+  document.getElementById('workflow-step-title').textContent = title;
+  document.getElementById('workflow-step-desc').textContent = description;
+  document.getElementById('guide-placement').textContent = guide.placement;
+  document.getElementById('guide-orientation').textContent = `Preferred: ${guide.orientation}`;
+  document.getElementById('guide-side').textContent = `Target side: ${state.selectedSide}`;
+
+  const warningEl = document.getElementById('warning-text');
+  warningEl.textContent = warning;
+  warningEl.className = `warning-text${tone ? ` ${tone}` : ''}`;
+}
+
+function refreshStatus() {
+  const range = sampleRange();
+  const stdDev = sampleStdDev();
+  const calMeta = state.calibrationMeta[state.mode];
+  const stabilityValue = !state.sampleBuffer.length ? 'Waiting' : (state.settled ? 'Settled' : 'Stabilizing');
+  const stabilitySub = !state.sampleBuffer.length
+    ? 'Need motion samples'
+    : `${state.sampleBuffer.length}/${SAMPLE_WINDOW} samples • spread ${formatNumber(range)}°`;
+  const orientationText = `${orientationLabel(state.screenOrientation)} ${state.orientationOk ? '✓' : '✕'}`;
+
+  document.getElementById('chip-stability').textContent = stabilityValue;
+  document.getElementById('chip-stability-sub').textContent = stabilitySub;
+  document.getElementById('chip-confidence').textContent = `${state.confidence}%`;
+  document.getElementById('chip-confidence-sub').textContent = `σ ${formatNumber(stdDev)}° • averaged live feed`;
+  document.getElementById('chip-orientation').textContent = orientationText;
+  document.getElementById('chip-orientation-sub').textContent = `Preferred for ${state.mode}: ${MODE_GUIDES[state.mode].orientation}`;
+  document.getElementById('chip-calibration').textContent = calMeta ? formatSigned(calMeta.offset) : 'Not set';
+  document.getElementById('chip-calibration-sub').textContent = calMeta
+    ? `Zeroed ${formatTime(calMeta.time)} • ${orientationLabel(calMeta.orientation)}`
+    : 'Zero this mode first';
+}
+
+function refreshGauge() {
+  const avg = sampleAverage();
+  updateNeedle(avg);
+  drawBubble(avg);
+  document.getElementById('gauge-mode-label').textContent = MODE_LABELS[state.mode];
+  document.getElementById('avg-display').textContent = `Avg ${formatSigned(avg)} from ${state.sampleBuffer.length} sample${state.sampleBuffer.length === 1 ? '' : 's'}`;
+  document.getElementById('confidence-label').textContent = state.settled ? `Confidence ${state.confidence}% • Settled` : `Confidence ${state.confidence}% • Live`;
+}
+
+function refreshCalibrationCard() {
+  const meta = state.calibrationMeta[state.mode];
+  const valueText = meta
+    ? `Offset ${formatSigned(meta.offset)} for ${MODE_LABELS[state.mode]}`
+    : 'None — tap Zero This Mode to calibrate';
+  const historyText = meta
+    ? `Last set ${formatTime(meta.time)} in ${orientationLabel(meta.orientation)}. Stored locally per mode.`
+    : 'Saved locally per mode.';
+
+  document.getElementById('cal-value-text').textContent = valueText;
+  document.getElementById('cal-history-text').textContent = historyText;
+  document.getElementById('btn-reset-cal').disabled = !meta;
+}
+
+function refreshLockButton() {
+  const btn = document.getElementById('btn-lock');
+  btn.textContent = state.locked ? 'Resume Live' : 'Lock';
+  btn.className = `btn btn-small ${state.locked ? 'btn-warning' : 'btn-surface'}`;
+  btn.title = state.locked ? 'Resume live reading' : 'Lock reading';
+  document.getElementById('btn-save').disabled = !state.settled;
+}
+
+function refreshSavedReadings() {
+  document.querySelectorAll('.side-btn').forEach(button => {
+    button.classList.toggle('active', button.dataset.side === state.selectedSide);
+  });
+
+  const current = measurementFor(state.mode, state.selectedSide);
+  document.getElementById('saved-side-title').textContent = `${MODE_LABELS[state.mode]} · ${state.selectedSide}`;
+  document.getElementById('saved-side-value').textContent = current ? formatSigned(current.value) : 'No saved reading';
+  document.getElementById('saved-side-note').textContent = current
+    ? `Saved ${formatTime(current.time)} • ${current.confidence}% confidence • ${current.samples} samples`
+    : 'Hold the phone steady until it settles, then tap Save Avg.';
+
+  const frontDelta = deltaFor(state.mode, 'FL', 'FR');
+  const rearDelta = deltaFor(state.mode, 'RL', 'RR');
+  document.getElementById('front-delta').textContent = frontDelta === null ? '—' : formatSigned(frontDelta);
+  document.getElementById('front-delta-note').textContent = frontDelta === null ? 'Save both front sides for this mode.' : 'Negative means FR is more positive than FL.';
+  document.getElementById('rear-delta').textContent = rearDelta === null ? '—' : formatSigned(rearDelta);
+  document.getElementById('rear-delta-note').textContent = rearDelta === null ? 'Save both rear sides for this mode.' : 'Negative means RR is more positive than RL.';
+
+  const list = document.getElementById('saved-list');
+  const readings = SIDES
+    .map(side => measurementFor(state.mode, side))
+    .filter(Boolean)
+    .sort((a, b) => SIDES.indexOf(a.side) - SIDES.indexOf(b.side));
+
+  if (!readings.length) {
+    list.innerHTML = '<div class="saved-item empty">No saved readings yet for this mode.</div>';
+    return;
+  }
+
+  list.innerHTML = readings.map(item => `
+    <div class="saved-item">
+      <div>
+        <div class="saved-label">${item.side}</div>
+        <div class="saved-meta">Saved ${formatTime(item.time)} • ${item.confidence}% confidence • ${item.samples} samples</div>
+      </div>
+      <strong class="saved-value">${formatSigned(item.value)}</strong>
+    </div>
+  `).join('');
+}
+
+function refreshAdvanced() {
+  document.getElementById('raw-alpha').textContent = `${formatNumber(state.alpha)}°`;
+  document.getElementById('raw-beta').textContent = `${formatNumber(state.beta)}°`;
+  document.getElementById('raw-gamma').textContent = `${formatNumber(state.gamma)}°`;
+  document.getElementById('sample-spread').textContent = `${formatNumber(sampleRange())}° range • ${formatNumber(sampleStdDev())}° σ`;
+
+  const list = document.getElementById('mode-cal-list');
+  list.innerHTML = MODES.map(mode => {
+    const meta = state.calibrationMeta[mode];
+    return `
+      <div class="advanced-item">
+        <span class="advanced-label">${MODE_LABELS[mode]}</span>
+        <strong class="advanced-value">${meta ? formatSigned(meta.offset) : 'Not set'}</strong>
+        <span class="saved-meta">${meta ? `Saved ${formatTime(meta.time)} • ${orientationLabel(meta.orientation)}` : 'No stored zero yet.'}</span>
+      </div>
+    `;
+  }).join('');
+}
+
+function refreshUI() {
+  state.screenOrientation = currentOrientation();
+  state.orientationOk = state.screenOrientation === preferredOrientation();
+  refreshGuide();
+  refreshGauge();
+  refreshStatus();
+  refreshCalibrationCard();
+  refreshLockButton();
+  refreshSavedReadings();
+  refreshAdvanced();
+}
+
 (function init() {
-  // Pre-hide sensor banner until sensors are confirmed available
+  loadState();
   hideSensorBanner();
+  initGaugeSVG();
+  window.addEventListener('resize', refreshUI);
+  window.addEventListener('orientationchange', () => {
+    resetLiveAveraging();
+    refreshUI();
+  });
+  refreshUI();
 })();
 </script>
 </body>

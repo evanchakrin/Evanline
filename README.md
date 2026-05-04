@@ -10,13 +10,14 @@ Uses the iPhone's built-in **gyroscope & accelerometer** (DeviceOrientation API)
 | Feature | Details |
 |---|---|
 | **Camber mode** | Measure wheel camber angle (tilt relative to vertical) |
-| **Toe mode** | Approximate toe-in / toe-out angle |
+| **Toe mode** | Approximate toe-in / toe-out angle with a dedicated zero workflow |
 | **Level mode** | Check if the vehicle or surface is left-right level |
 | **Pitch mode** | Measure front-to-back pitch angle |
-| **Bubble level** | Animated visual level indicator |
-| **Arc gauge** | Live needle gauge with ±30° range |
-| **Calibration** | Zero/calibrate on any reference position |
-| **Lock reading** | Freeze the current reading to note it down |
+| **Sensor smoothing** | Smooths the live feed and averages recent samples before display |
+| **Settled detection** | Shows when the phone is stable enough to trust the reading |
+| **Per-mode calibration** | Keeps a separate zero offset for each mode |
+| **Saved side readings** | Store FL / FR / RL / RR readings locally and compare deltas |
+| **Advanced data** | Hide raw sensor values in an expandable debug section |
 | **PWA** | Add to iPhone Home Screen for full-screen experience |
 
 ---
@@ -42,21 +43,20 @@ npx serve .
 
 ---
 
-## How to measure camber
+## Better measurement workflow
 
-1. Park on level ground. Use **Level** mode to verify the surface.
-2. Switch to **Camber** mode.
-3. Place the phone flat against the wheel face (hub area), screen facing outward.
-4. Tap **Zero / Calibrate** if you want to zero on a known reference first.
-5. Read the angle. Typical spec: **−0.5° to −1.5°** negative camber for most road cars.
-6. Tap **⏸ Lock** to freeze the reading while you record it.
+1. Use **Level** mode first to verify the car or floor is close to level.
+2. Switch to the mode you want and tap **Zero This Mode** on a known reference.
+3. Match the preferred orientation shown in the app.
+4. Hold the phone still until the reading becomes **Settled**.
+5. Tap **Save Avg** for FL, FR, RL, or RR and compare the left/right delta.
 
 ---
 
 ## Accuracy
 
 Phone sensors are **consumer-grade** (±0.1°–0.5° typical error).  
-Results are indicative and suitable for DIY reference. Professional alignment requires a calibrated laser rack.
+Evanline now smooths live data, waits for stable samples, and saves averaged readings to improve repeatability, but results remain indicative. Professional alignment still requires a calibrated laser rack.
 
 ---
 
