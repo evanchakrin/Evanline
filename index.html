@@ -1258,10 +1258,11 @@ function loadState() {
         samples: Number.isFinite(item.samples) ? item.samples : 0,
         time: typeof item.time === 'string' ? item.time : new Date().toISOString(),
       }));
-  } catch (_) {
+  } catch (error) {
     state.calibrationOffsets = defaultOffsets();
     state.calibrationMeta = defaultCalibrationMeta();
     state.measurements = [];
+    console.warn('Unable to restore saved Evanline state.', error);
     state.notice = {
       text: 'Saved calibration could not be restored. Local storage may be unavailable.',
       tone: 'warn',
@@ -1277,7 +1278,8 @@ function saveState() {
       calibrationMeta: state.calibrationMeta,
       measurements: state.measurements.slice(-MAX_STORED_MEASUREMENTS),
     }));
-  } catch (_) {
+  } catch (error) {
+    console.warn('Unable to persist Evanline state.', error);
     state.notice = {
       text: 'Local storage is unavailable, so saved zeros and readings may not persist.',
       tone: 'warn',
@@ -1421,7 +1423,7 @@ function calibrate() {
   };
   resetLiveAveraging();
   saveState();
-  setNotice(`${MODE_LABELS[state.mode]} zeroed and saved locally.`, 'good');
+  setNotice(`${MODE_LABELS[state.mode]} set to zero and saved locally.`, 'good');
   refreshUI();
 }
 
@@ -1601,9 +1603,9 @@ function refreshSavedReadings() {
   const frontDelta = deltaFor(state.mode, 'FL', 'FR');
   const rearDelta = deltaFor(state.mode, 'RL', 'RR');
   document.getElementById('front-delta').textContent = frontDelta === null ? '—' : formatSigned(frontDelta);
-  document.getElementById('front-delta-note').textContent = frontDelta === null ? 'Save both front sides for this mode.' : 'Negative means FL is more negative than FR.';
+  document.getElementById('front-delta-note').textContent = frontDelta === null ? 'Save both front sides for this mode.' : 'A negative delta means FL is smaller than FR.';
   document.getElementById('rear-delta').textContent = rearDelta === null ? '—' : formatSigned(rearDelta);
-  document.getElementById('rear-delta-note').textContent = rearDelta === null ? 'Save both rear sides for this mode.' : 'Negative means RL is more negative than RR.';
+  document.getElementById('rear-delta-note').textContent = rearDelta === null ? 'Save both rear sides for this mode.' : 'A negative delta means RL is smaller than RR.';
 
   const list = document.getElementById('saved-list');
   const readings = SIDES
