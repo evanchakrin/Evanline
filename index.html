@@ -873,8 +873,12 @@ const MODES = ['camber', 'toe', 'level', 'pitch'];
 const SIDES = ['FL', 'FR', 'RL', 'RR'];
 const MAX_STORED_MEASUREMENTS = 32;
 const NOTICE_DISPLAY_MS = 2600;
+const MAX_CONFIDENCE_BASE = 98;
+const ORIENTATION_PENALTY = 30;
+const CALIBRATION_PENALTY = 12;
 const RANGE_PENALTY = 260;
 const STDDEV_PENALTY = 420;
+const ALIGNED_HOLD_MS = 500;
 const MODE_LABELS = {
   camber: 'Camber Angle',
   toe: 'Toe Angle',
@@ -1090,7 +1094,7 @@ function updateNeedle(angleDeg) {
     display.style.color = 'var(--green)';
     badge.classList.add('visible');
     svgText.setAttribute('opacity', '1');
-    svgText.textContent = '● SETTLED + ALIGNED';
+    svgText.textContent = '● Settled & aligned';
   } else {
     badge.classList.remove('visible');
     svgText.setAttribute('opacity', '0');
@@ -1197,9 +1201,9 @@ function updateSampleQuality() {
   const stableNow = enoughSamples && range <= SETTLED_RANGE && stdDev <= SETTLED_STDDEV && state.orientationOk;
   const avg = sampleAverage();
 
-  let confidence = Math.round(98 - (range * RANGE_PENALTY) - (stdDev * STDDEV_PENALTY));
-  if (!state.orientationOk) confidence -= 30;
-  if (!state.calibrationMeta[state.mode]) confidence -= 12;
+  let confidence = Math.round(MAX_CONFIDENCE_BASE - (range * RANGE_PENALTY) - (stdDev * STDDEV_PENALTY));
+  if (!state.orientationOk) confidence -= ORIENTATION_PENALTY;
+  if (!state.calibrationMeta[state.mode]) confidence -= CALIBRATION_PENALTY;
   confidence = clamp(confidence, 5, 99);
 
   if (stableNow) {
@@ -1218,7 +1222,7 @@ function updateSampleQuality() {
     state.alignedStart = 0;
   }
 
-  state.aligned = alignedNow && (now - state.alignedStart >= 500);
+  state.aligned = alignedNow && (now - state.alignedStart >= ALIGNED_HOLD_MS);
   state.confidence = confidence;
 }
 
