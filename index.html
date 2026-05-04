@@ -1445,7 +1445,9 @@ function toggleLock() {
   if (!state.locked) {
     resetLiveAveraging();
   }
-  setNotice(state.locked ? 'Reading locked. Save the average or tap Resume Live.' : 'Live reading resumed.', state.locked ? 'good' : 'warn');
+  const noticeText = state.locked ? 'Reading locked. Save the average or tap Resume Live.' : 'Live reading resumed.';
+  const noticeTone = state.locked ? 'good' : 'warn';
+  setNotice(noticeText, noticeTone);
   refreshUI();
 }
 
@@ -1491,6 +1493,13 @@ function deltaFor(mode, leftSide, rightSide) {
   const right = measurementFor(mode, rightSide);
   if (!left || !right) return null;
   return left.value - right.value;
+}
+
+function buildElement(tagName, className, text) {
+  const element = document.createElement(tagName);
+  if (className) element.className = className;
+  if (text !== undefined) element.textContent = text;
+  return element;
 }
 
 function refreshGuide() {
@@ -1617,20 +1626,26 @@ function refreshSavedReadings() {
     .filter(Boolean)
     .sort((a, b) => SIDES.indexOf(a.side) - SIDES.indexOf(b.side));
 
+  list.textContent = '';
+
   if (!readings.length) {
-    list.innerHTML = '<div class="saved-item empty">No saved readings yet for this mode.</div>';
+    list.appendChild(buildElement('div', 'saved-item empty', 'No saved readings yet for this mode.'));
     return;
   }
 
-  list.innerHTML = readings.map(item => `
-    <div class="saved-item">
-      <div>
-        <div class="saved-label">${item.side}</div>
-        <div class="saved-meta">Saved ${formatTime(item.time)} • ${item.confidence}% confidence • ${item.samples} samples</div>
-      </div>
-      <strong class="saved-value">${formatSigned(item.value)}</strong>
-    </div>
-  `).join('');
+  readings.forEach(item => {
+    const row = buildElement('div', 'saved-item');
+    const metaWrap = document.createElement('div');
+    const label = buildElement('div', 'saved-label', item.side);
+    const meta = buildElement('div', 'saved-meta', `Saved ${formatTime(item.time)} • ${item.confidence}% confidence • ${item.samples} samples`);
+    const value = buildElement('strong', 'saved-value', formatSigned(item.value));
+
+    metaWrap.appendChild(label);
+    metaWrap.appendChild(meta);
+    row.appendChild(metaWrap);
+    row.appendChild(value);
+    list.appendChild(row);
+  });
 }
 
 function refreshAdvanced() {
@@ -1640,16 +1655,19 @@ function refreshAdvanced() {
   document.getElementById('sample-spread').textContent = `${formatNumber(sampleRange())}° range • ${formatNumber(sampleStdDev())}° σ`;
 
   const list = document.getElementById('mode-cal-list');
-  list.innerHTML = MODES.map(mode => {
+  list.textContent = '';
+  MODES.forEach(mode => {
     const meta = state.calibrationMeta[mode];
-    return `
-      <div class="advanced-item">
-        <span class="advanced-label">${MODE_LABELS[mode]}</span>
-        <strong class="advanced-value">${meta ? formatSigned(meta.offset) : 'Not set'}</strong>
-        <span class="saved-meta">${meta ? `Saved ${formatTime(meta.time)} • ${orientationLabel(meta.orientation)}` : 'No stored zero yet.'}</span>
-      </div>
-    `;
-  }).join('');
+    const item = buildElement('div', 'advanced-item');
+    const label = buildElement('span', 'advanced-label', MODE_LABELS[mode]);
+    const value = buildElement('strong', 'advanced-value', meta ? formatSigned(meta.offset) : 'Not set');
+    const detail = buildElement('span', 'saved-meta', meta ? `Saved ${formatTime(meta.time)} • ${orientationLabel(meta.orientation)}` : 'No stored zero yet.');
+
+    item.appendChild(label);
+    item.appendChild(value);
+    item.appendChild(detail);
+    list.appendChild(item);
+  });
 }
 
 function refreshUI() {
