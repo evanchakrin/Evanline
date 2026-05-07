@@ -16,6 +16,12 @@ Uses the iPhone's built-in **gyroscope & accelerometer** (DeviceOrientation API)
 | **Sensor smoothing** | Smooths the live feed and averages recent samples before display |
 | **Settled detection** | Shows when the phone is stable enough to trust the reading |
 | **Per-mode calibration** | Keeps a separate zero offset for each mode |
+| **Quick / Precision workflows** | Fast single-save mode or a deeper session with baseline, fixture, and repeatability checks |
+| **Device reference** | Capture a trusted device bias reference and reuse it across modes |
+| **Fixture profiles** | Save named jig / fixture setups locally, including whether the fixture is reversible |
+| **Around-car baseline** | Capture FL / FR / RL / RR level points to establish a session baseline plane |
+| **Reversal capture sets** | Pair forward and reversed jig placements to expose mounting bias |
+| **Repeatability scoring** | Score repeated capture sets before accepting a precision measurement |
 | **Saved side readings** | Store FL / FR / RL / RR readings locally and compare deltas |
 | **Advanced data** | Hide raw sensor values in an expandable debug section |
 | **PWA** | Add to iPhone Home Screen for full-screen experience |
@@ -51,12 +57,23 @@ npx serve .
 4. Hold the phone still until the reading becomes **Settled**.
 5. Tap **Save Avg** for FL, FR, RL, or RR and compare the left/right delta.
 
+### Precision workflow
+
+1. Switch from **Quick workflow** to **Precision workflow**.
+2. Capture a trusted **device reference** on a known surface.
+3. Save or select a named **fixture profile** for your jig or phone mount.
+4. In **Level** mode, capture baseline points at **FL, FR, RL, and RR**.
+5. For each wheel reading, capture repeated **forward** readings, then repeated **reversed** readings if the fixture is reversible.
+6. Save the measurement only after the app reports good **repeatability**, acceptable **reversal bias**, and a trustworthy **baseline**.
+
 ---
 
 ## Accuracy
 
 Phone sensors are **consumer-grade** (±0.1°–0.5° typical error).  
 Evanline now smooths live data, waits for stable samples, and saves averaged readings to improve repeatability, but results remain indicative. Professional alignment still requires a calibrated laser rack.
+
+For higher-accuracy DIY work, design the physical jig around **rigid 3-point wheel-face contact**, avoid using the tire sidewall as the primary datum, and prefer a **symmetric or reversible** phone mount so the precision workflow can cancel mounting bias.
 
 ---
 
