@@ -1129,6 +1129,9 @@ const SETTLED_STDDEV = 0.08;
 const SETTLED_HOLD_MS = 900;
 const PRECISION_CAPTURE_TARGET = 3;
 const BASELINE_CAPTURE_TARGET = 2;
+const REPEATABILITY_RANGE_FACTOR = 120;
+const REPEATABILITY_STDDEV_FACTOR = 220;
+const REPEATABILITY_REVERSAL_FACTOR = 70;
 
 const state = {
   mode: 'camber',
@@ -1181,6 +1184,27 @@ function defaultPrecisionSession() {
 
 function measurementKey(mode, side) {
   return `${mode}:${side}`;
+}
+
+function readStoredState() {
+  const v3Raw = localStorage.getItem(STORAGE_KEY);
+  if (v3Raw) {
+    try {
+      return JSON.parse(v3Raw);
+    } catch (error) {
+      console.warn('Unable to parse v3 Evanline state, attempting legacy fallback.', error);
+    }
+  }
+
+  const legacyRaw = localStorage.getItem('evanline-state-v2');
+  if (!legacyRaw) return null;
+  const parsed = JSON.parse(legacyRaw);
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
+  } catch (error) {
+    console.warn('Unable to migrate legacy Evanline state to v3 storage.', error);
+  }
+  return parsed;
 }
 
 function clamp(value, min, max) {
@@ -1498,16 +1522,22 @@ function precisionSummary(mode = state.mode, side = state.selectedSide) {
   const forwardReady = !!forward && forward.count >= 2;
   const reverseReady = !!reverse && reverse.count >= 2;
   const rawValue = forward ? forward.mean : null;
+  // Reversing the fixture should flip the true angle sign while leaving placement bias behind.
+  // Averaging forward + reverse exposes that bias, while differencing them cancels it back out.
   const reversalBias = forward && reverse ? (forward.mean + reverse.mean) / 2 : null;
   const correctedValue = forward && reverse ? (forward.mean - reverse.mean) / 2 : rawValue;
   const baselineComp = Number.isFinite(correctedValue) ? baselineCompensationForSide(side, mode, baseline) : 0;
   const finalValue = Number.isFinite(correctedValue) ? correctedValue - baselineComp : null;
   const rangePenalty = (forward?.range || 0) + (reverse?.range || 0);
   const deviationPenalty = (forward?.stdDev || 0) + (reverse?.stdDev || 0);
-  const reversalPenalty = reversalBias === null ? (needsReverse ? 18 : 8) : Math.abs(reversalBias) * 70;
+  const reversalPenalty = reversalBias === null ? (needsReverse ? 18 : 8) : Math.abs(reversalBias) * REPEATABILITY_REVERSAL_FACTOR;
   const baselinePenalty = !baseline.complete ? 18 : baseline.label === 'Trusted' ? 0 : baseline.label === 'Approximate' ? 8 : 18;
   const capturePenalty = Math.max(0, 3 - (forward?.count || 0)) * 10 + (needsReverse ? Math.max(0, 2 - (reverse?.count || 0)) * 10 : 0);
-  const repeatabilityScore = clamp(Math.round(100 - (rangePenalty * 120) - (deviationPenalty * 220) - reversalPenalty - baselinePenalty - capturePenalty), 5, 99);
+  const repeatabilityScore = clamp(
+    Math.round(100 - (rangePenalty * REPEATABILITY_RANGE_FACTOR) - (deviationPenalty * REPEATABILITY_STDDEV_FACTOR) - reversalPenalty - baselinePenalty - capturePenalty),
+    5,
+    99
+  );
 
   let verdict = 'Need more captures';
   if (forwardReady && (!needsReverse || reverseReady)) {
@@ -1631,9 +1661,8 @@ function updateSampleQuality() {
 
 function loadState() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem('evanline-state-v2');
-    if (!raw) return;
-    const parsed = JSON.parse(raw);
+    const parsed = readStoredState();
+    if (!parsed) return;
     const offsets = defaultOffsets();
     MODES.forEach(mode => {
       const value = parsed?.calibrationOffsets?.[mode];
