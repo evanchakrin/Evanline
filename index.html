@@ -1130,6 +1130,7 @@ const SETTLED_STDDEV = 0.08;
 const SETTLED_HOLD_MS = 900;
 const PRECISION_CAPTURE_TARGET = 3;
 const BASELINE_CAPTURE_TARGET = 2;
+const MIN_PRECISION_CAPTURES_READY = 2;
 const REPEATABILITY_RANGE_FACTOR = 120;
 const REPEATABILITY_STDDEV_FACTOR = 220;
 const REPEATABILITY_REVERSAL_FACTOR = 70;
@@ -1539,8 +1540,8 @@ function precisionSummary(mode = state.mode, side = state.selectedSide) {
   const baseline = baselineSummary();
   const fixture = activeFixture();
   const needsReverse = !!fixture?.reversible;
-  const forwardReady = !!forward && forward.count >= 2;
-  const reverseReady = !!reverse && reverse.count >= 2;
+  const forwardReady = !!forward && forward.count >= MIN_PRECISION_CAPTURES_READY;
+  const reverseReady = !!reverse && reverse.count >= MIN_PRECISION_CAPTURES_READY;
   const forwardOnlyValue = forward ? forward.mean : null;
   // Reversing the fixture should flip the true angle sign while leaving placement bias behind.
   // Averaging forward + reverse exposes that bias, while subtracting reverse from forward cancels the shared bias back out.
@@ -2175,7 +2176,7 @@ function savePrecisionMeasurement() {
     mode: state.mode,
     side: state.selectedSide,
     value: Number(summary.finalValue.toFixed(2)),
-    // Precision confidence blends live stability with cross-capture agreement, unlike quick mode where confidence only reflects the current live sample window.
+    // Precision confidence averages live stability with cross-capture agreement so one shaky moment or one clean batch cannot dominate the saved trust signal by itself.
     confidence: Math.round((state.confidence + summary.repeatabilityScore) / 2),
     samples: (summary.forward?.count || 0) + (summary.reverse?.count || 0),
     time: new Date().toISOString(),
