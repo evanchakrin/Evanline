@@ -1132,6 +1132,13 @@ const BASELINE_CAPTURE_TARGET = 2;
 const REPEATABILITY_RANGE_FACTOR = 120;
 const REPEATABILITY_STDDEV_FACTOR = 220;
 const REPEATABILITY_REVERSAL_FACTOR = 70;
+const REVERSAL_REQUIRED_MISSING_PENALTY = 18;
+const REVERSAL_OPTIONAL_MISSING_PENALTY = 8;
+const BASELINE_QUALITY_PENALTIES = {
+  Trusted: 0,
+  Approximate: 8,
+  Noisy: 18,
+};
 
 const state = {
   mode: 'camber',
@@ -1521,17 +1528,19 @@ function precisionSummary(mode = state.mode, side = state.selectedSide) {
   const needsReverse = !!fixture?.reversible;
   const forwardReady = !!forward && forward.count >= 2;
   const reverseReady = !!reverse && reverse.count >= 2;
-  const rawValue = forward ? forward.mean : null;
+  const forwardOnlyValue = forward ? forward.mean : null;
   // Reversing the fixture should flip the true angle sign while leaving placement bias behind.
   // Averaging forward + reverse exposes that bias, while differencing them cancels it back out.
   const reversalBias = forward && reverse ? (forward.mean + reverse.mean) / 2 : null;
-  const correctedValue = forward && reverse ? (forward.mean - reverse.mean) / 2 : rawValue;
-  const baselineComp = Number.isFinite(correctedValue) ? baselineCompensationForSide(side, mode, baseline) : 0;
-  const finalValue = Number.isFinite(correctedValue) ? correctedValue - baselineComp : null;
+  const reversalCorrectedValue = forward && reverse ? (forward.mean - reverse.mean) / 2 : forwardOnlyValue;
+  const baselineComp = Number.isFinite(reversalCorrectedValue) ? baselineCompensationForSide(side, mode, baseline) : 0;
+  const finalValue = Number.isFinite(reversalCorrectedValue) ? reversalCorrectedValue - baselineComp : null;
   const rangePenalty = (forward?.range || 0) + (reverse?.range || 0);
   const deviationPenalty = (forward?.stdDev || 0) + (reverse?.stdDev || 0);
-  const reversalPenalty = reversalBias === null ? (needsReverse ? 18 : 8) : Math.abs(reversalBias) * REPEATABILITY_REVERSAL_FACTOR;
-  const baselinePenalty = !baseline.complete ? 18 : baseline.label === 'Trusted' ? 0 : baseline.label === 'Approximate' ? 8 : 18;
+  const reversalPenalty = reversalBias === null
+    ? (needsReverse ? REVERSAL_REQUIRED_MISSING_PENALTY : REVERSAL_OPTIONAL_MISSING_PENALTY)
+    : Math.abs(reversalBias) * REPEATABILITY_REVERSAL_FACTOR;
+  const baselinePenalty = !baseline.complete ? BASELINE_QUALITY_PENALTIES.Noisy : (BASELINE_QUALITY_PENALTIES[baseline.label] ?? BASELINE_QUALITY_PENALTIES.Noisy);
   const capturePenalty = Math.max(0, 3 - (forward?.count || 0)) * 10 + (needsReverse ? Math.max(0, 2 - (reverse?.count || 0)) * 10 : 0);
   const repeatabilityScore = clamp(
     Math.round(100 - (rangePenalty * REPEATABILITY_RANGE_FACTOR) - (deviationPenalty * REPEATABILITY_STDDEV_FACTOR) - reversalPenalty - baselinePenalty - capturePenalty),
@@ -1554,8 +1563,8 @@ function precisionSummary(mode = state.mode, side = state.selectedSide) {
     bucket,
     forward,
     reverse,
-    rawValue,
-    correctedValue,
+    forwardOnlyValue,
+    reversalCorrectedValue,
     finalValue,
     reversalBias,
     baselineCompensation: baselineComp,
@@ -2152,12 +2161,13 @@ function savePrecisionMeasurement() {
     mode: state.mode,
     side: state.selectedSide,
     value: Number(summary.finalValue.toFixed(2)),
+    // Blend live sensor confidence with cross-capture repeatability so saved precision readings reflect both stability and agreement.
     confidence: Math.round((state.confidence + summary.repeatabilityScore) / 2),
     samples: (summary.forward?.count || 0) + (summary.reverse?.count || 0),
     time: new Date().toISOString(),
     workflow: 'precision',
-    rawValue: Number((summary.rawValue ?? 0).toFixed(3)),
-    correctedValue: Number((summary.correctedValue ?? 0).toFixed(3)),
+    rawValue: Number((summary.forwardOnlyValue ?? 0).toFixed(3)),
+    correctedValue: Number((summary.reversalCorrectedValue ?? 0).toFixed(3)),
     reversalBias: summary.reversalBias === null ? null : Number(summary.reversalBias.toFixed(3)),
     repeatabilityScore: summary.repeatabilityScore,
     captureCount: (summary.forward?.count || 0) + (summary.reverse?.count || 0),
@@ -2408,7 +2418,7 @@ function refreshPrecisionCard() {
     ? `Front-Rear ${formatSigned(baseline.frontRearDelta || 0)} • ${baseline.label}`
     : 'Front/rear and left/right averages from Level mode.';
   document.getElementById('precision-final-value').textContent = Number.isFinite(summary.finalValue) ? formatSigned(summary.finalValue) : '—';
-  document.getElementById('precision-final-sub').textContent = `${summary.verdict}${Number.isFinite(summary.correctedValue) ? ` • corrected ${formatSigned(summary.correctedValue)}` : ''}`;
+  document.getElementById('precision-final-sub').textContent = `${summary.verdict}${Number.isFinite(summary.reversalCorrectedValue) ? ` • corrected ${formatSigned(summary.reversalCorrectedValue)}` : ''}`;
   document.getElementById('btn-save-precision').disabled = !summary.readyToSave || !Number.isFinite(summary.finalValue);
 }
 
@@ -2417,10 +2427,14 @@ function refreshLockButton() {
   btn.textContent = state.locked ? 'Resume Live' : 'Lock';
   btn.className = `btn btn-small ${state.locked ? 'btn-warning' : 'btn-surface'}`;
   btn.title = state.locked ? 'Resume live reading' : 'Lock reading';
-  const summary = precisionSummary(state.mode, state.selectedSide);
   const saveBtn = document.getElementById('btn-save');
   saveBtn.textContent = state.workflow === 'precision' ? 'Save Precision' : 'Save Avg';
-  saveBtn.disabled = state.workflow === 'precision' ? (!summary.readyToSave || !Number.isFinite(summary.finalValue)) : !state.settled;
+  if (state.workflow === 'precision') {
+    const summary = precisionSummary(state.mode, state.selectedSide);
+    saveBtn.disabled = !summary.readyToSave || !Number.isFinite(summary.finalValue);
+  } else {
+    saveBtn.disabled = !state.settled;
+  }
 }
 
 function refreshSavedReadings() {
