@@ -1076,6 +1076,7 @@
 </div>
 
 <script>
+// v3 adds workflow/session objects beyond the older v2 zero + readings payload, so loadState() migrates legacy data forward on first read.
 const STORAGE_KEY = 'evanline-state-v3';
 const MODES = ['camber', 'toe', 'level', 'pitch'];
 const SIDES = ['FL', 'FR', 'RL', 'RR'];
@@ -1134,6 +1135,12 @@ const REPEATABILITY_STDDEV_FACTOR = 220;
 const REPEATABILITY_REVERSAL_FACTOR = 70;
 const REVERSAL_REQUIRED_MISSING_PENALTY = 18;
 const REVERSAL_OPTIONAL_MISSING_PENALTY = 8;
+const FORWARD_CAPTURE_TARGET = 3;
+const REVERSE_CAPTURE_TARGET = 2;
+const INSUFFICIENT_CAPTURE_PENALTY = 10;
+const ADJUSTMENT_QUALITY_THRESHOLD = 88;
+const COMPARISON_QUALITY_THRESHOLD = 68;
+const MAX_ACCEPTABLE_REVERSAL_BIAS = 0.08;
 const BASELINE_QUALITY_PENALTIES = {
   Trusted: 0,
   Approximate: 8,
@@ -1205,7 +1212,13 @@ function readStoredState() {
 
   const legacyRaw = localStorage.getItem('evanline-state-v2');
   if (!legacyRaw) return null;
-  const parsed = JSON.parse(legacyRaw);
+  let parsed;
+  try {
+    parsed = JSON.parse(legacyRaw);
+  } catch (error) {
+    console.warn('Unable to parse legacy Evanline state.', error);
+    return null;
+  }
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
   } catch (error) {
@@ -1530,7 +1543,7 @@ function precisionSummary(mode = state.mode, side = state.selectedSide) {
   const reverseReady = !!reverse && reverse.count >= 2;
   const forwardOnlyValue = forward ? forward.mean : null;
   // Reversing the fixture should flip the true angle sign while leaving placement bias behind.
-  // Averaging forward + reverse exposes that bias, while differencing them cancels it back out.
+  // Averaging forward + reverse exposes that bias, while subtracting reverse from forward cancels the shared bias back out.
   const reversalBias = forward && reverse ? (forward.mean + reverse.mean) / 2 : null;
   const reversalCorrectedValue = forward && reverse ? (forward.mean - reverse.mean) / 2 : forwardOnlyValue;
   const baselineComp = Number.isFinite(reversalCorrectedValue) ? baselineCompensationForSide(side, mode, baseline) : 0;
@@ -1541,7 +1554,8 @@ function precisionSummary(mode = state.mode, side = state.selectedSide) {
     ? (needsReverse ? REVERSAL_REQUIRED_MISSING_PENALTY : REVERSAL_OPTIONAL_MISSING_PENALTY)
     : Math.abs(reversalBias) * REPEATABILITY_REVERSAL_FACTOR;
   const baselinePenalty = !baseline.complete ? BASELINE_QUALITY_PENALTIES.Noisy : (BASELINE_QUALITY_PENALTIES[baseline.label] ?? BASELINE_QUALITY_PENALTIES.Noisy);
-  const capturePenalty = Math.max(0, 3 - (forward?.count || 0)) * 10 + (needsReverse ? Math.max(0, 2 - (reverse?.count || 0)) * 10 : 0);
+  const capturePenalty = Math.max(0, FORWARD_CAPTURE_TARGET - (forward?.count || 0)) * INSUFFICIENT_CAPTURE_PENALTY
+    + (needsReverse ? Math.max(0, REVERSE_CAPTURE_TARGET - (reverse?.count || 0)) * INSUFFICIENT_CAPTURE_PENALTY : 0);
   const repeatabilityScore = clamp(
     Math.round(100 - (rangePenalty * REPEATABILITY_RANGE_FACTOR) - (deviationPenalty * REPEATABILITY_STDDEV_FACTOR) - reversalPenalty - baselinePenalty - capturePenalty),
     5,
@@ -1550,9 +1564,9 @@ function precisionSummary(mode = state.mode, side = state.selectedSide) {
 
   let verdict = 'Need more captures';
   if (forwardReady && (!needsReverse || reverseReady)) {
-    if (repeatabilityScore >= 88 && baseline.label === 'Trusted' && (!needsReverse || Math.abs(reversalBias || 0) <= 0.08)) {
+    if (repeatabilityScore >= ADJUSTMENT_QUALITY_THRESHOLD && baseline.label === 'Trusted' && (!needsReverse || Math.abs(reversalBias || 0) <= MAX_ACCEPTABLE_REVERSAL_BIAS)) {
       verdict = 'Good enough for adjustment';
-    } else if (repeatabilityScore >= 68) {
+    } else if (repeatabilityScore >= COMPARISON_QUALITY_THRESHOLD) {
       verdict = 'Good enough for comparison';
     } else {
       verdict = 'Re-run session';
@@ -2161,7 +2175,7 @@ function savePrecisionMeasurement() {
     mode: state.mode,
     side: state.selectedSide,
     value: Number(summary.finalValue.toFixed(2)),
-    // Blend live sensor confidence with cross-capture repeatability so saved precision readings reflect both stability and agreement.
+    // Precision confidence blends live stability with cross-capture agreement, unlike quick mode where confidence only reflects the current live sample window.
     confidence: Math.round((state.confidence + summary.repeatabilityScore) / 2),
     samples: (summary.forward?.count || 0) + (summary.reverse?.count || 0),
     time: new Date().toISOString(),
