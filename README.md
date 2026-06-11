@@ -88,11 +88,11 @@ For higher-accuracy DIY work, design the physical jig around **rigid 3-point whe
 
 ## Project structure
 
-- `/home/runner/work/Evanline/Evanline/evanchakrin/Evanline/index.html` — app markup
-- `/home/runner/work/Evanline/Evanline/evanchakrin/Evanline/assets/css/styles.css` — styling
-- `/home/runner/work/Evanline/Evanline/evanchakrin/Evanline/assets/js/app.js` — UI + app orchestration
-- `/home/runner/work/Evanline/Evanline/evanchakrin/Evanline/assets/js/domain.js` — reusable measurement/math logic
-- `/home/runner/work/Evanline/Evanline/evanchakrin/Evanline/service-worker.js` — offline caching
+- `./index.html` — app markup
+- `./assets/css/styles.css` — styling
+- `./assets/js/app.js` — UI + app orchestration
+- `./assets/js/domain.js` — reusable measurement/math logic
+- `./service-worker.js` — offline caching
 
 ---
 
