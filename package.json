@@ -1,0 +1,9 @@
+{
+  "name": "evanline",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "lint": "node --check assets/js/app.js && node --check assets/js/domain.js && node --check service-worker.js"
+  }
+}
