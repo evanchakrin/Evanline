@@ -33,12 +33,18 @@ self.addEventListener('fetch', event => {
 
   if (event.request.mode === 'navigate') {
     event.respondWith(
-      fetch(event.request).then(response => {
-        caches.open(CACHE_NAME).then(cache => {
-          cache.put(event.request, response.clone());
-        });
+      fetch(event.request).then(async response => {
+        const cache = await caches.open(CACHE_NAME);
+        await cache.put(event.request, response.clone());
         return response;
-      }).catch(() => caches.match(event.request).then(cached => cached || caches.match('./index.html')))
+      }).catch(async error => {
+        const cached = await caches.match(event.request);
+        if (cached) return cached;
+        const fallback = await caches.match('./index.html');
+        if (fallback) return fallback;
+        console.warn('Navigation request failed with no cached fallback.', error);
+        return Response.error();
+      })
     );
     return;
   }
