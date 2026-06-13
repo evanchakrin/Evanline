@@ -79,9 +79,31 @@ For higher-accuracy DIY work, design the physical jig around **rigid 3-point whe
 
 ## Tech stack
 
-- Pure **HTML / CSS / JavaScript** — zero dependencies, zero build step
+- Pure **HTML / CSS / JavaScript** with modularized app and domain scripts
 - [W3C DeviceOrientation API](https://www.w3.org/TR/orientation-event/)
 - PWA manifest for "Add to Home Screen"
+- Service Worker cache for offline access after first load
+
+---
+
+## Project structure
+
+- `./index.html` — app markup
+- `./assets/css/styles.css` — styling
+- `./assets/js/app.js` — UI + app orchestration
+- `./assets/js/domain.js` — reusable measurement/math logic
+- `./service-worker.js` — offline caching
+
+---
+
+## Quality checks
+
+```bash
+npm run lint
+npm test
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full verification checklist and device matrix.
 
 ---
 
