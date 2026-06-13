@@ -1310,7 +1310,7 @@ function refreshStatus() {
   el('chip-confidence').textContent = `${state.confidence}%`;
   el('chip-confidence-sub').textContent = state.sensorListenerAttached
     ? `σ ${formatNumber(stdDev)}° • averaged live feed`
-    : 'Start measuring to refresh confidence';
+    : 'Start Measuring to refresh confidence';
   el('chip-orientation').textContent = orientationText;
   el('chip-orientation-sub').textContent = `Preferred for ${state.mode}: ${MODE_GUIDES[state.mode].orientation}`;
   el('chip-calibration').textContent = calMeta ? formatSigned(calMeta.offset) : 'Not set';
