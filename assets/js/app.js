@@ -102,6 +102,7 @@ const state = {
   screenOrientation: 'portrait',
   orientationOk: true,
   notice: null,
+  lastSaveConfirmation: null,
   liveRefreshScheduled: false,
 };
 
@@ -284,10 +285,12 @@ function updateNeedle(angleDeg) {
   if (state.aligned) {
     display.style.color = 'var(--green)';
     badge.classList.add('visible');
+    badge.setAttribute('aria-hidden', 'false');
     svgText.setAttribute('opacity', '1');
     svgText.textContent = '● Settled & aligned';
   } else {
     badge.classList.remove('visible');
+    badge.setAttribute('aria-hidden', 'true');
     svgText.setAttribute('opacity', '0');
     svgText.textContent = '';
     if (abs < NEEDLE_GOOD_THRESHOLD_DEG) display.style.color = 'var(--text)';
@@ -623,6 +626,10 @@ function setNotice(text, tone = 'warn') {
   };
 }
 
+function setSaveConfirmation(text) {
+  state.lastSaveConfirmation = text;
+}
+
 function activeNotice() {
   if (!state.notice) return null;
   if (Date.now() > state.notice.until) {
@@ -668,12 +675,14 @@ function requestSensors(callback) {
           state.sensorsAvailable = true;
           hideSensorBanner();
         } else {
+          state.sensorsAvailable = false;
           showSensorBanner();
         }
         refreshUI();
         if (callback) callback(response === 'granted');
       })
       .catch(() => {
+        state.sensorsAvailable = false;
         showSensorBanner();
         refreshUI();
         if (callback) callback(false);
@@ -685,6 +694,7 @@ function requestSensors(callback) {
     refreshUI();
     if (callback) callback(true);
   } else {
+    state.sensorsAvailable = false;
     showSensorBanner();
     refreshUI();
     if (callback) callback(false);
@@ -701,7 +711,9 @@ function hideSensorBanner() {
 
 function showScreen(id) {
   document.querySelectorAll('.screen').forEach(screen => {
-    screen.classList.toggle('hidden', screen.id !== id);
+    const hidden = screen.id !== id;
+    screen.classList.toggle('hidden', hidden);
+    screen.setAttribute('aria-hidden', String(hidden));
   });
 }
 
@@ -711,6 +723,17 @@ function startApp() {
     initGaugeSVG();
     drawBubble(sampleAverage());
     if (!ok) showSensorBanner();
+    refreshUI();
+  });
+}
+
+function retrySensors() {
+  requestSensors(ok => {
+    if (ok) {
+      setNotice('Motion sensors are active. Keep the phone planted until the reading settles.', 'good');
+    } else {
+      setNotice('Sensor access is still blocked. Confirm Safari, HTTPS or localhost, and motion permission settings.', 'warn');
+    }
     refreshUI();
   });
 }
@@ -737,6 +760,7 @@ function selectSide(side) {
   state.selectedSide = side;
   // Side selection affects the guide step, precision panel, lock button label, and saved-readings list.
   refreshGuide();
+  refreshReadiness();
   refreshPrecisionCard();
   refreshLockButton();
   refreshSavedReadings();
@@ -885,7 +909,96 @@ function toggleLock() {
   setNotice(noticeText, noticeTone);
   // Lock affects the save/lock controls and the guide step (warning row and instructions).
   refreshGuide();
+  refreshReadiness();
   refreshLockButton();
+}
+
+function guideStepNumber(title) {
+  const match = /^(\d+)/.exec(title);
+  return match ? Number(match[1]) : 1;
+}
+
+function guideActionState() {
+  const guide = MODE_GUIDES[state.mode];
+  const precision = precisionSummary(state.mode, state.selectedSide);
+  const baseline = precision.baseline;
+  if (!state.sensorsAvailable) {
+    return { label: 'Retry sensor access', action: 'retrySensors', reason: 'Motion permission is required before measuring.' };
+  }
+  if (state.workflow === 'precision' && !state.deviceProfile) {
+    return {
+      label: state.settled ? 'Capture device reference' : 'Hold steady for device ref',
+      action: 'captureDeviceCalibration',
+      reason: state.settled ? 'Ready to capture a trusted device bias.' : 'Device reference needs a settled reading first.',
+    };
+  }
+  if (state.workflow === 'precision' && !activeFixture()) {
+    return { label: 'Save or select fixture', action: 'createOrUpdateFixture', reason: 'Precision captures need a named fixture profile.' };
+  }
+  if (state.workflow === 'precision' && state.mode !== 'level' && !baseline.complete) {
+    return { label: 'Switch to Level baseline', action: 'setModeLevel', reason: `${baseline.completedSides}/4 baseline points are ready.` };
+  }
+  if (!(state.calibrationMeta.level || hasSavedLevelReading()) && state.mode !== 'level') {
+    return { label: 'Switch to Level first', action: 'setModeLevel', reason: 'Level mode prepares a trustworthy baseline.' };
+  }
+  if (!state.calibrationMeta[state.mode]) {
+    return { label: 'Zero this mode', action: 'calibrate', reason: `${MODE_LABELS[state.mode]} is not zeroed yet.` };
+  }
+  if (!state.orientationOk) {
+    return { label: `Rotate to ${guide.orientation}`, action: 'none', reason: `Current orientation is ${orientationLabel(state.screenOrientation)}.` };
+  }
+  if (state.workflow === 'precision' && !(precision.forward && precision.forward.count)) {
+    return {
+      label: state.settled ? 'Capture forward' : 'Hold steady for forward',
+      action: 'captureForward',
+      reason: state.settled ? 'Forward capture set is ready for a sample.' : 'Forward capture needs a settled reading.',
+    };
+  }
+  if (state.workflow === 'precision' && precision.needsReverse && !(precision.reverse && precision.reverse.count)) {
+    return {
+      label: state.settled ? 'Capture reversed' : 'Hold steady for reverse',
+      action: 'captureReverse',
+      reason: state.settled ? 'Reversed capture set is ready for a sample.' : 'Reversed capture needs a settled reading.',
+    };
+  }
+  if (!state.settled) {
+    return { label: 'Hold steady', action: 'none', reason: 'Movement or jitter is still above the settled threshold.' };
+  }
+  return {
+    label: state.workflow === 'precision' ? 'Save precision report' : 'Save averaged reading',
+    action: 'saveMeasurement',
+    reason: state.workflow === 'precision' ? precisionSaveReason(precision) : 'Settled reading is ready to save.',
+  };
+}
+
+function performGuideAction() {
+  const { action } = guideActionState();
+  const handlers = {
+    retrySensors: () => retrySensors(),
+    captureDeviceCalibration: () => captureDeviceCalibration(),
+    createOrUpdateFixture: () => createOrUpdateFixture(),
+    setModeLevel: () => setMode('level'),
+    calibrate: () => calibrate(),
+    captureForward: () => capturePrecisionReading('forward'),
+    captureReverse: () => capturePrecisionReading('reverse'),
+    saveMeasurement: () => saveMeasurement(),
+  };
+  if (handlers[action]) {
+    handlers[action]();
+  } else {
+    refreshUI();
+  }
+}
+
+function precisionSaveReason(summary = precisionSummary(state.mode, state.selectedSide)) {
+  if (!Number.isFinite(summary.finalValue)) return 'Capture repeated readings before saving.';
+  if (!summary.forward || summary.forward.count < PRECISION_CONSTANTS.MIN_PRECISION_CAPTURES_READY) {
+    return `Need ${PRECISION_CONSTANTS.MIN_PRECISION_CAPTURES_READY} forward captures.`;
+  }
+  if (summary.needsReverse && (!summary.reverse || summary.reverse.count < PRECISION_CONSTANTS.MIN_PRECISION_CAPTURES_READY)) {
+    return `Need ${PRECISION_CONSTANTS.MIN_PRECISION_CAPTURES_READY} reversed captures.`;
+  }
+  return `${summary.verdict} • ${summary.repeatabilityScore}% repeatability.`;
 }
 
 function captureBaselinePoint(side) {
@@ -975,6 +1088,7 @@ function saveQuickMeasurement() {
   state.measurements = state.measurements.filter(item => !(item.mode === measurement.mode && item.side === measurement.side));
   state.measurements.push(measurement);
   saveState();
+  setSaveConfirmation(`Saved ${MODE_LABELS[state.mode]} · ${state.selectedSide} at ${formatSigned(measurement.value)} with ${measurement.confidence}% confidence.`);
   setNotice(`Saved averaged ${state.mode} reading for ${state.selectedSide}.`, 'good');
   refreshUI();
 }
@@ -1010,6 +1124,7 @@ function savePrecisionMeasurement() {
   state.measurements = state.measurements.filter(item => !(item.mode === measurement.mode && item.side === measurement.side));
   state.measurements.push(measurement);
   saveState();
+  setSaveConfirmation(`Saved precision ${MODE_LABELS[state.mode]} · ${state.selectedSide} at ${formatSigned(measurement.value)} • ${measurement.trustVerdict}.`);
   setNotice(`Saved precision ${state.mode} reading for ${state.selectedSide}.`, 'good');
   refreshUI();
 }
@@ -1076,6 +1191,40 @@ function refreshGuide() {
   const warningEl = el('warning-text');
   warningEl.textContent = warning;
   warningEl.className = `warning-text${tone ? ` ${tone}` : ''}`;
+
+  const step = guideStepNumber(title);
+  document.querySelectorAll('[data-guide-dot]').forEach(dot => {
+    const value = Number(dot.dataset.guideDot);
+    dot.classList.toggle('done', value < step);
+    dot.classList.toggle('active', value === step);
+  });
+
+  const actionState = guideActionState();
+  const guideAction = el('guide-action');
+  guideAction.textContent = actionState.label;
+  guideAction.title = actionState.reason;
+  guideAction.disabled = actionState.action === 'none';
+}
+
+function refreshReadiness() {
+  const actionState = guideActionState();
+  const summary = precisionSummary(state.mode, state.selectedSide);
+  const saveReady = state.workflow === 'precision'
+    ? summary.readyToSave && Number.isFinite(summary.finalValue)
+    : state.settled;
+  const liveState = state.locked ? 'Locked' : (!state.sampleBuffer.length ? 'Waiting' : (state.settled ? 'Settled' : 'Settling'));
+  const saveReason = state.workflow === 'precision'
+    ? precisionSaveReason(summary)
+    : (state.settled ? 'Settled average is ready.' : `${state.sampleBuffer.length}/${SAMPLE_WINDOW} samples • hold steady.`);
+
+  el('readiness-live').textContent = liveState;
+  el('readiness-live-sub').textContent = state.locked
+    ? 'Resume for live updates'
+    : `${state.sampleBuffer.length}/${SAMPLE_WINDOW} samples`;
+  el('readiness-save').textContent = saveReady ? 'Ready' : 'Blocked';
+  el('readiness-save-sub').textContent = saveReason;
+  el('readiness-next').textContent = actionState.label;
+  el('readiness-next-sub').textContent = actionState.reason;
 }
 
 function refreshStatus() {
@@ -1157,6 +1306,16 @@ function refreshPrecisionCard() {
     : `${baseline.completedSides}/4 points captured in Level mode.`;
   el('precision-trust-status').textContent = summary.verdict;
   el('precision-trust-sub').textContent = `Repeatability ${summary.repeatabilityScore}% • ${summary.needsReverse ? 'Reverse required' : 'Forward-only fixture'}`;
+  el('precision-summary-device').textContent = state.deviceProfile ? 'Device OK' : 'Device missing';
+  el('precision-summary-fixture').textContent = fixture ? 'Fixture OK' : 'Fixture missing';
+  el('precision-summary-baseline').textContent = baseline.complete ? `Baseline ${baseline.label}` : `Baseline ${baseline.completedSides}/4`;
+  el('precision-summary-trust').textContent = `${summary.repeatabilityScore}% trust`;
+
+  const deviceCapture = el('btn-capture-device');
+  deviceCapture.disabled = !state.settled;
+  deviceCapture.title = state.settled
+    ? 'Capture the current settled sensor bias as the device reference.'
+    : 'Hold the phone steady until stability turns to Settled before capturing device bias.';
 
   const fixtureSelect = el('fixture-select');
   const currentValue = state.precisionSession.fixtureId || '';
@@ -1186,6 +1345,10 @@ function refreshPrecisionCard() {
     sub.textContent = !stats
       ? '0 captures'
       : `${stats.count} cap • σ ${formatNumber(stats.stdDev)}°`;
+    btn.disabled = state.workflow !== 'precision' || state.mode !== 'level' || !state.settled;
+    btn.title = state.mode === 'level'
+      ? (state.settled ? `Capture baseline point for ${side}.` : 'Hold steady in Level mode before capturing.')
+      : 'Switch to Level mode to capture baseline points.';
   });
 
   el('precision-target').textContent = `${MODE_LABELS[state.mode]} · ${state.selectedSide}`;
@@ -1212,7 +1375,21 @@ function refreshPrecisionCard() {
     : 'Front/rear and left/right averages from Level mode.';
   el('precision-final-value').textContent = Number.isFinite(summary.finalValue) ? formatSigned(summary.finalValue) : '—';
   el('precision-final-sub').textContent = `${summary.verdict}${Number.isFinite(summary.reversalCorrectedValue) ? ` • corrected ${formatSigned(summary.reversalCorrectedValue)}` : ''}`;
+  const captureBlockedReason = !fixture
+    ? 'Select or save a fixture profile before capturing.'
+    : (!state.settled
+        ? 'Hold steady until stability turns to Settled before capturing.'
+        : (state.mode !== 'level' && !baseline.complete
+            ? 'Capture all four Level baseline points before wheel captures.'
+            : 'Capture a settled reading for the selected side.'));
+  const captureBlocked = !fixture || !state.settled || (state.mode !== 'level' && !baseline.complete);
+  el('btn-capture-forward').disabled = captureBlocked;
+  el('btn-capture-reverse').disabled = captureBlocked;
+  el('btn-capture-forward').title = captureBlockedReason;
+  el('btn-capture-reverse').title = captureBlockedReason;
   el('btn-save-precision').disabled = !summary.readyToSave || !Number.isFinite(summary.finalValue);
+  el('btn-save-precision').title = precisionSaveReason(summary);
+  el('precision-control-hint').textContent = captureBlocked ? `Capture blocked: ${captureBlockedReason}` : precisionSaveReason(summary);
 }
 
 function refreshLockButton() {
@@ -1225,9 +1402,18 @@ function refreshLockButton() {
   if (state.workflow === 'precision') {
     const summary = precisionSummary(state.mode, state.selectedSide);
     saveBtn.disabled = !summary.readyToSave || !Number.isFinite(summary.finalValue);
+    saveBtn.title = precisionSaveReason(summary);
   } else {
     saveBtn.disabled = !state.settled;
+    saveBtn.title = state.settled ? 'Save the settled average for the selected side.' : 'Hold steady until stability turns to Settled.';
   }
+  el('quick-control-hint').textContent = saveBtn.title;
+}
+
+function refreshSaveConfirmation() {
+  const confirmation = el('save-confirmation');
+  confirmation.textContent = state.lastSaveConfirmation || '';
+  confirmation.classList.toggle('hidden-panel', !state.lastSaveConfirmation);
 }
 
 function refreshSavedReadings() {
@@ -1318,6 +1504,7 @@ function refreshUI() {
   state.orientationOk = state.screenOrientation === preferredOrientation();
   refreshWorkflowMode();
   refreshGuide();
+  refreshReadiness();
   refreshGauge();
   refreshStatus();
   refreshCalibrationCard();
@@ -1325,6 +1512,7 @@ function refreshUI() {
   refreshLockButton();
   refreshSavedReadings();
   refreshAdvanced();
+  refreshSaveConfirmation();
   refreshAriaState();
 }
 
@@ -1332,10 +1520,12 @@ function refreshLiveUI() {
   state.screenOrientation = currentOrientation();
   state.orientationOk = state.screenOrientation === preferredOrientation();
   refreshGuide();
+  refreshReadiness();
   refreshGauge();
   refreshStatus();
   refreshLockButton();
   refreshAdvanced();
+  refreshSaveConfirmation();
   refreshAriaState();
 }
 
@@ -1363,7 +1553,9 @@ function setupEventHandlers() {
     if (!action) return;
     const handlers = {
       startApp: () => startApp(),
+      retrySensors: () => retrySensors(),
       showInstructions: () => showInstructions(),
+      performGuideAction: () => performGuideAction(),
       toggleLock: () => toggleLock(),
       setWorkflow: () => setWorkflow(arg),
       setMode: () => setMode(arg),
