@@ -4,6 +4,6 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "lint": "node --check assets/js/app.js && node --check assets/js/domain.js && node --check service-worker.js"
+    "lint": "node --check assets/js/app.js && node --check assets/js/domain.js && node --check assets/js/precision.js && node --check service-worker.js"
   }
 }

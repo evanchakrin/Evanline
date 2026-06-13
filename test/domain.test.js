@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 
 import {
   average,
+  buildArcPath,
+  captureSeriesStats,
   clamp,
   clampAngle,
   computeSampleQuality,
+  polarPoint,
   standardDeviation,
 } from '../assets/js/domain.js';
 
@@ -80,4 +83,38 @@ test('computeSampleQuality resets timers when unstable', () => {
   assert.equal(result.aligned, false);
   assert.equal(result.settledStart, 0);
   assert.equal(result.alignedStart, 0);
+});
+
+test('polarPoint places points around the given centre', () => {
+  // 0° in this scheme points "up" (angleDeg - 90 = -90 rad).
+  const top = polarPoint(100, 100, 50, 0);
+  assert.ok(Math.abs(top.x - 100) < 1e-9);
+  assert.ok(Math.abs(top.y - 50) < 1e-9);
+
+  const right = polarPoint(100, 100, 50, 90);
+  assert.ok(Math.abs(right.x - 150) < 1e-9);
+  assert.ok(Math.abs(right.y - 100) < 1e-9);
+});
+
+test('buildArcPath uses the large-arc flag for arcs >= 180 degrees', () => {
+  const small = buildArcPath(0, 0, 10, -90, 0);
+  assert.match(small, / 0 1 /);
+
+  // Exactly 180 degrees should set the large-arc flag (regression guard).
+  const half = buildArcPath(0, 0, 10, -90, 90);
+  assert.match(half, / 1 1 /);
+
+  const big = buildArcPath(0, 0, 10, -180, 90);
+  assert.match(big, / 1 1 /);
+});
+
+test('captureSeriesStats returns null for empty input and aggregates otherwise', () => {
+  assert.equal(captureSeriesStats([]), null);
+
+  const stats = captureSeriesStats([{ value: 1 }, { value: 3 }, { value: 2 }]);
+  assert.equal(stats.count, 3);
+  assert.equal(stats.mean, 2);
+  assert.equal(stats.range, 2);
+  assert.equal(stats.latest.value, 2);
+  assert.ok(stats.stdDev > 0);
 });

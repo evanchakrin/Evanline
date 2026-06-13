@@ -1,12 +1,19 @@
 import {
   average,
   buildArcPath,
-  clamp,
+  captureSeriesStats,
   clampAngle as clampAngleInRange,
   computeSampleQuality,
   polarPoint,
   standardDeviation,
 } from './domain.js';
+import {
+  PRECISION_CONSTANTS,
+  baselineSummary as computeBaselineSummary,
+  baselineCompensationForSide as computeBaselineCompensation,
+  computeGuideState,
+  precisionSummary as computePrecisionSummary,
+} from './precision.js';
 
 // v3 adds workflow/session objects beyond the older v2 zero + readings payload, so loadState() migrates legacy data forward on first read.
 const STORAGE_KEY = 'evanline-state-v3';
@@ -54,6 +61,11 @@ const CX = 150, CY = 168, R = 126;
 const START_DEG = -180, END_DEG = 0;
 const GAUGE_RANGE = 30;
 const ALIGNED_THRESHOLD = 0.3;
+const DIRECTION_DEADBAND_DEG = 0.15;
+const BUBBLE_LEVEL_THRESHOLD_DEG = 0.5;
+const BUBBLE_WARN_THRESHOLD_DEG = 3;
+const NEEDLE_GOOD_THRESHOLD_DEG = 1.5;
+const NEEDLE_WARN_THRESHOLD_DEG = 3;
 const SMOOTHING_ALPHA = 0.22;
 const SAMPLE_WINDOW = 12;
 const MIN_SAMPLE_COUNT = 6;
@@ -62,23 +74,6 @@ const SETTLED_STDDEV = 0.08;
 const SETTLED_HOLD_MS = 900;
 const PRECISION_CAPTURE_TARGET = 3;
 const BASELINE_CAPTURE_TARGET = 2;
-const MIN_PRECISION_CAPTURES_READY = 2;
-const REPEATABILITY_RANGE_FACTOR = 120;
-const REPEATABILITY_STDDEV_FACTOR = 220;
-const REPEATABILITY_REVERSAL_FACTOR = 70;
-const REVERSAL_REQUIRED_MISSING_PENALTY = 18;
-const REVERSAL_OPTIONAL_MISSING_PENALTY = 8;
-const FORWARD_CAPTURE_TARGET = 3;
-const REVERSE_CAPTURE_TARGET = 2;
-const INSUFFICIENT_CAPTURE_PENALTY = 10;
-const ADJUSTMENT_QUALITY_THRESHOLD = 88;
-const COMPARISON_QUALITY_THRESHOLD = 68;
-const MAX_ACCEPTABLE_REVERSAL_BIAS = 0.08;
-const BASELINE_QUALITY_PENALTIES = {
-  Trusted: 0,
-  Approximate: 8,
-  Noisy: 18,
-};
 
 const state = {
   mode: 'camber',
@@ -134,6 +129,12 @@ function measurementKey(mode, side) {
   return `${mode}:${side}`;
 }
 
+function el(id) {
+  const node = document.getElementById(id);
+  if (!node) throw new Error(`Missing required element #${id}`);
+  return node;
+}
+
 function readStoredState() {
   const v3Raw = localStorage.getItem(STORAGE_KEY);
   if (v3Raw) {
@@ -155,6 +156,7 @@ function readStoredState() {
   }
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
+    localStorage.removeItem('evanline-state-v2');
   } catch (error) {
     console.warn('Unable to migrate legacy Evanline state to v3 storage.', error);
   }
@@ -166,10 +168,10 @@ function clampAngle(angle) {
 }
 
 function initGaugeSVG() {
-  const bgArc = document.getElementById('gauge-bg-arc');
-  const colArc = document.getElementById('gauge-arc');
-  const ticks = document.getElementById('gauge-ticks');
-  const labels = document.getElementById('gauge-tick-labels');
+  const bgArc = el('gauge-bg-arc');
+  const colArc = el('gauge-arc');
+  const ticks = el('gauge-ticks');
+  const labels = el('gauge-tick-labels');
   const path = buildArcPath(CX, CY, R, START_DEG, END_DEG);
 
   bgArc.setAttribute('d', path);
@@ -201,7 +203,7 @@ function initGaugeSVG() {
 }
 
 function drawBubble(angle) {
-  const canvas = document.getElementById('bubble-canvas');
+  const canvas = el('bubble-canvas');
   if (!canvas) return;
 
   const ctx = canvas.getContext('2d');
@@ -246,8 +248,8 @@ function drawBubble(angle) {
   const clampedAngle = clampAngle(angle);
   const bubbleX = mx - (clampedAngle / GAUGE_RANGE) * (tubeW / 2 - tubeR - 2);
   const bubbleR = 12;
-  const isLevel = Math.abs(angle) < 0.5;
-  const bubbleColour = isLevel ? '#3fb950' : (Math.abs(angle) < 3 ? '#d29922' : '#f85149');
+  const isLevel = Math.abs(angle) < BUBBLE_LEVEL_THRESHOLD_DEG;
+  const bubbleColour = isLevel ? '#3fb950' : (Math.abs(angle) < BUBBLE_WARN_THRESHOLD_DEG ? '#d29922' : '#f85149');
   const gradient = ctx.createRadialGradient(bubbleX - 3, my - 4, 2, bubbleX, my, bubbleR);
 
   gradient.addColorStop(0, 'rgba(255,255,255,0.35)');
@@ -270,10 +272,10 @@ function drawBubble(angle) {
 function updateNeedle(angleDeg) {
   const clampedAngle = clampAngle(angleDeg);
   const rotDeg = (clampedAngle / GAUGE_RANGE) * 90;
-  const needle = document.getElementById('gauge-needle');
-  const display = document.getElementById('angle-display');
-  const badge = document.getElementById('aligned-badge');
-  const svgText = document.getElementById('svg-aligned-text');
+  const needle = el('gauge-needle');
+  const display = el('angle-display');
+  const badge = el('aligned-badge');
+  const svgText = el('svg-aligned-text');
   const abs = Math.abs(angleDeg);
 
   needle.setAttribute('transform', `rotate(${rotDeg},${CX},${CY})`);
@@ -288,25 +290,25 @@ function updateNeedle(angleDeg) {
     badge.classList.remove('visible');
     svgText.setAttribute('opacity', '0');
     svgText.textContent = '';
-    if (abs < 1.5) display.style.color = 'var(--text)';
-    else if (abs < 3) display.style.color = 'var(--yellow)';
+    if (abs < NEEDLE_GOOD_THRESHOLD_DEG) display.style.color = 'var(--text)';
+    else if (abs < NEEDLE_WARN_THRESHOLD_DEG) display.style.color = 'var(--yellow)';
     else display.style.color = 'var(--red)';
   }
 
-  document.getElementById('angle-direction').textContent = directionLabel(angleDeg);
+  el('angle-direction').textContent = directionLabel(angleDeg);
 }
 
 function directionLabel(angleDeg) {
   if (state.mode === 'camber') {
-    return angleDeg > 0.15 ? '▲ Positive Camber' : angleDeg < -0.15 ? '▼ Negative Camber' : '— Zero Camber';
+    return angleDeg > DIRECTION_DEADBAND_DEG ? '▲ Positive Camber' : angleDeg < -DIRECTION_DEADBAND_DEG ? '▼ Negative Camber' : '— Zero Camber';
   }
   if (state.mode === 'toe') {
-    return angleDeg > 0.15 ? '→ Toe Out' : angleDeg < -0.15 ? '← Toe In' : '— Neutral';
+    return angleDeg > DIRECTION_DEADBAND_DEG ? '→ Toe Out' : angleDeg < -DIRECTION_DEADBAND_DEG ? '← Toe In' : '— Neutral';
   }
   if (state.mode === 'level') {
-    return angleDeg > 0.15 ? '↗ Tilts Right' : angleDeg < -0.15 ? '↖ Tilts Left' : '— Level';
+    return angleDeg > DIRECTION_DEADBAND_DEG ? '↗ Tilts Right' : angleDeg < -DIRECTION_DEADBAND_DEG ? '↖ Tilts Left' : '— Level';
   }
-  return angleDeg > 0.15 ? '↑ Nose Up' : angleDeg < -0.15 ? '↓ Nose Down' : '— Flat';
+  return angleDeg > DIRECTION_DEADBAND_DEG ? '↑ Nose Up' : angleDeg < -DIRECTION_DEADBAND_DEG ? '↓ Nose Down' : '— Flat';
 }
 
 function formatNumber(value) {
@@ -324,18 +326,6 @@ function formatTime(isoString) {
   const date = new Date(isoString);
   if (Number.isNaN(date.getTime())) return '—';
   return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-}
-
-function captureSeriesStats(series = []) {
-  if (!series.length) return null;
-  const values = series.map(item => item.value);
-  return {
-    count: series.length,
-    mean: average(values),
-    range: Math.max(...values) - Math.min(...values),
-    stdDev: standardDeviation(values),
-    latest: series[series.length - 1],
-  };
 }
 
 function activeFixture() {
@@ -373,123 +363,22 @@ function baselineStatsForSide(side) {
 }
 
 function baselineSummary() {
-  const sideStats = SIDES.reduce((acc, side) => {
-    const stats = baselineStatsForSide(side);
-    if (stats) acc[side] = stats;
-    return acc;
-  }, {});
-  const completedSides = Object.keys(sideStats).length;
-  const allMeans = Object.values(sideStats).map(item => item.mean);
-  const overallMean = allMeans.length ? average(allMeans) : 0;
-  const leftAvg = sideStats.FL && sideStats.RL ? average([sideStats.FL.mean, sideStats.RL.mean]) : null;
-  const rightAvg = sideStats.FR && sideStats.RR ? average([sideStats.FR.mean, sideStats.RR.mean]) : null;
-  const frontAvg = sideStats.FL && sideStats.FR ? average([sideStats.FL.mean, sideStats.FR.mean]) : null;
-  const rearAvg = sideStats.RL && sideStats.RR ? average([sideStats.RL.mean, sideStats.RR.mean]) : null;
-  const worstStdDev = Math.max(0, ...Object.values(sideStats).map(item => item.stdDev));
-  const worstRange = Math.max(0, ...Object.values(sideStats).map(item => item.range));
-  let label = 'Incomplete';
-  let tone = 'warn';
-
-  if (completedSides === SIDES.length) {
-    if (worstStdDev <= 0.06 && worstRange <= 0.16) {
-      label = 'Trusted';
-      tone = 'good';
-    } else if (worstStdDev <= 0.14 && worstRange <= 0.3) {
-      label = 'Approximate';
-    } else {
-      label = 'Noisy';
-    }
-  }
-
-  return {
-    sideStats,
-    completedSides,
-    complete: completedSides === SIDES.length,
-    overallMean,
-    leftAvg,
-    rightAvg,
-    frontAvg,
-    rearAvg,
-    leftRightDelta: leftAvg !== null && rightAvg !== null ? leftAvg - rightAvg : null,
-    frontRearDelta: frontAvg !== null && rearAvg !== null ? frontAvg - rearAvg : null,
-    worstStdDev,
-    worstRange,
-    label,
-    tone,
-  };
+  return computeBaselineSummary(state.precisionSession.baselinePoints, SIDES, PRECISION_CONSTANTS);
 }
 
 function baselineCompensationForSide(side, mode, summary = baselineSummary()) {
-  if (!summary.complete) return 0;
-  if (mode === 'camber' || mode === 'level') {
-    const stats = summary.sideStats[side];
-    return stats ? stats.mean - summary.overallMean : 0;
-  }
-  return 0;
+  return computeBaselineCompensation(side, mode, summary);
 }
 
 function precisionSummary(mode = state.mode, side = state.selectedSide) {
-  const key = measurementKey(mode, side);
-  const bucket = state.precisionSession.captures[key] || {
+  return computePrecisionSummary({
     mode,
     side,
-    forward: [],
-    reverse: [],
-  };
-  const forward = captureSeriesStats(bucket.forward);
-  const reverse = captureSeriesStats(bucket.reverse);
-  const baseline = baselineSummary();
-  const fixture = activeFixture();
-  const needsReverse = !!fixture?.reversible;
-  const forwardReady = !!forward && forward.count >= MIN_PRECISION_CAPTURES_READY;
-  const reverseReady = !!reverse && reverse.count >= MIN_PRECISION_CAPTURES_READY;
-  const forwardOnlyValue = forward ? forward.mean : null;
-  // Reversing the fixture should flip the true angle sign while leaving placement bias behind.
-  // Averaging forward + reverse exposes that bias, while subtracting reverse from forward cancels the shared bias back out.
-  const reversalBias = forward && reverse ? (forward.mean + reverse.mean) / 2 : null;
-  const reversalCorrectedValue = forward && reverse ? (forward.mean - reverse.mean) / 2 : forwardOnlyValue;
-  const baselineComp = Number.isFinite(reversalCorrectedValue) ? baselineCompensationForSide(side, mode, baseline) : 0;
-  const finalValue = Number.isFinite(reversalCorrectedValue) ? reversalCorrectedValue - baselineComp : null;
-  const rangePenalty = (forward?.range || 0) + (reverse?.range || 0);
-  const deviationPenalty = (forward?.stdDev || 0) + (reverse?.stdDev || 0);
-  const reversalPenalty = reversalBias === null
-    ? (needsReverse ? REVERSAL_REQUIRED_MISSING_PENALTY : REVERSAL_OPTIONAL_MISSING_PENALTY)
-    : Math.abs(reversalBias) * REPEATABILITY_REVERSAL_FACTOR;
-  const baselinePenalty = !baseline.complete ? BASELINE_QUALITY_PENALTIES.Noisy : (BASELINE_QUALITY_PENALTIES[baseline.label] ?? BASELINE_QUALITY_PENALTIES.Noisy);
-  const capturePenalty = Math.max(0, FORWARD_CAPTURE_TARGET - (forward?.count || 0)) * INSUFFICIENT_CAPTURE_PENALTY
-    + (needsReverse ? Math.max(0, REVERSE_CAPTURE_TARGET - (reverse?.count || 0)) * INSUFFICIENT_CAPTURE_PENALTY : 0);
-  const repeatabilityScore = clamp(
-    Math.round(100 - (rangePenalty * REPEATABILITY_RANGE_FACTOR) - (deviationPenalty * REPEATABILITY_STDDEV_FACTOR) - reversalPenalty - baselinePenalty - capturePenalty),
-    5,
-    99
-  );
-
-  let verdict = 'Need more captures';
-  if (forwardReady && (!needsReverse || reverseReady)) {
-    if (repeatabilityScore >= ADJUSTMENT_QUALITY_THRESHOLD && baseline.label === 'Trusted' && (!needsReverse || Math.abs(reversalBias || 0) <= MAX_ACCEPTABLE_REVERSAL_BIAS)) {
-      verdict = 'Good enough for adjustment';
-    } else if (repeatabilityScore >= COMPARISON_QUALITY_THRESHOLD) {
-      verdict = 'Good enough for comparison';
-    } else {
-      verdict = 'Re-run session';
-    }
-  }
-
-  return {
-    bucket,
-    forward,
-    reverse,
-    forwardOnlyValue,
-    reversalCorrectedValue,
-    finalValue,
-    reversalBias,
-    baselineCompensation: baselineComp,
-    baseline,
-    needsReverse,
-    readyToSave: forwardReady && (!needsReverse || reverseReady),
-    repeatabilityScore,
-    verdict,
-  };
+    captures: state.precisionSession.captures,
+    baseline: baselineSummary(),
+    fixture: activeFixture(),
+    constants: PRECISION_CONSTANTS,
+  });
 }
 
 function currentOrientation() {
@@ -803,11 +692,11 @@ function requestSensors(callback) {
 }
 
 function showSensorBanner() {
-  document.getElementById('sensor-banner').classList.remove('hidden');
+  el('sensor-banner').classList.remove('hidden');
 }
 
 function hideSensorBanner() {
-  document.getElementById('sensor-banner').classList.add('hidden');
+  el('sensor-banner').classList.add('hidden');
 }
 
 function showScreen(id) {
@@ -846,7 +735,11 @@ function setWorkflow(workflow) {
 
 function selectSide(side) {
   state.selectedSide = side;
-  refreshUI();
+  // Side selection only affects the guide step, precision panel, and saved-readings list.
+  refreshGuide();
+  refreshPrecisionCard();
+  refreshLockButton();
+  refreshSavedReadings();
 }
 
 function selectFixture(id) {
@@ -859,17 +752,40 @@ function selectFixture(id) {
 
 function createOrUpdateFixture() {
   const current = activeFixture();
-  const defaultName = current?.name || `Fixture ${state.fixtureProfiles.length + 1}`;
-  const name = window.prompt('Fixture profile name', defaultName);
-  if (!name || !name.trim()) return;
-  const notes = window.prompt('Fixture notes (contact points, wheel type, printed jig version)', current?.notes || '3-point wheel-face jig') || '';
-  const reversible = window.confirm('Can this fixture be flipped or mirrored for reversal checks?');
+  const dialog = el('fixture-dialog');
+  const nameInput = el('fixture-form-name');
+  const notesInput = el('fixture-form-notes');
+  const reversibleInput = el('fixture-form-reversible');
+  nameInput.value = current?.name || `Fixture ${state.fixtureProfiles.length + 1}`;
+  notesInput.value = current?.notes || '3-point wheel-face jig';
+  reversibleInput.checked = !!current?.reversible;
+  if (typeof dialog.showModal === 'function') {
+    dialog.showModal();
+  } else {
+    // Fallback for browsers without <dialog> support.
+    dialog.setAttribute('open', '');
+  }
+  // Focus the name field once the dialog is visible.
+  requestAnimationFrame(() => nameInput.focus());
+}
+
+function handleFixtureFormSubmit(event) {
+  event.preventDefault();
+  const dialog = el('fixture-dialog');
+  const name = el('fixture-form-name').value.trim();
+  if (!name) {
+    el('fixture-form-name').focus();
+    return;
+  }
+  const notes = el('fixture-form-notes').value.trim();
+  const reversible = el('fixture-form-reversible').checked;
+  const current = activeFixture();
   const id = current?.id || `fixture-${Date.now()}`;
   const profile = {
     id,
-    name: name.trim(),
+    name,
     reversible,
-    notes: notes.trim(),
+    notes,
     createdAt: current?.createdAt || new Date().toISOString(),
     lastUsedAt: new Date().toISOString(),
   };
@@ -877,7 +793,13 @@ function createOrUpdateFixture() {
   state.precisionSession.fixtureId = id;
   saveState();
   setNotice(`Fixture profile "${profile.name}" saved.`, 'good');
+  dialog.close('save');
   refreshUI();
+}
+
+function closeFixtureDialog() {
+  const dialog = el('fixture-dialog');
+  if (dialog.open) dialog.close('cancel');
 }
 
 function resetPrecisionSession() {
@@ -961,7 +883,9 @@ function toggleLock() {
   const noticeText = state.locked ? 'Reading locked. Save the average or tap Resume Live.' : 'Live reading resumed.';
   const noticeTone = state.locked ? 'good' : 'warn';
   setNotice(noticeText, noticeTone);
-  refreshUI();
+  // Lock only affects the save/lock controls and the guide warning row.
+  refreshGuide();
+  refreshLockButton();
 }
 
 function captureBaselinePoint(side) {
@@ -1122,73 +1046,34 @@ function buildElement(tagName, className, text) {
 
 function refreshGuide() {
   const guide = MODE_GUIDES[state.mode];
-  const notice = activeNotice();
-  const levelPrepared = !!(state.calibrationMeta.level || hasSavedLevelReading());
   const precision = precisionSummary(state.mode, state.selectedSide);
-  const baseline = precision.baseline;
-  let title = '1. Verify level surface';
-  let description = 'Use Level mode before alignment readings so your baseline is trustworthy.';
-  let warning = 'Waiting for sensor permission.';
-  let tone = 'warn';
+  const { title, description, warning, tone } = computeGuideState({
+    sensorsAvailable: state.sensorsAvailable,
+    notice: activeNotice(),
+    workflow: state.workflow,
+    mode: state.mode,
+    selectedSide: state.selectedSide,
+    deviceProfileSet: !!state.deviceProfile,
+    fixtureSelected: !!activeFixture(),
+    calibrationSet: !!state.calibrationMeta[state.mode],
+    levelPrepared: !!(state.calibrationMeta.level || hasSavedLevelReading()),
+    orientationOk: state.orientationOk,
+    screenOrientationLabel: orientationLabel(state.screenOrientation),
+    preferredOrientationLabel: guide.orientation,
+    settled: state.settled,
+    baseline: precision.baseline,
+    precision,
+    modeLabel: MODE_LABELS[state.mode],
+    guide,
+  });
 
-  if (!state.sensorsAvailable) {
-    warning = 'Enable motion access in Safari to begin measuring.';
-  } else if (notice) {
-    warning = notice.text;
-    tone = notice.tone;
-  } else if (state.workflow === 'precision' && !state.deviceProfile) {
-    title = '1. Capture device reference';
-    description = 'Place the phone on a trusted reference and capture device bias before trusting a precision session.';
-    warning = 'Device reference is not set yet.';
-  } else if (state.workflow === 'precision' && !activeFixture()) {
-    title = '2. Confirm the fixture';
-    description = 'Use a named fixture profile so the same jig, phone registration, and wheel datum are reused across the session.';
-    warning = 'Select or save a fixture profile before wheel captures.';
-  } else if (state.workflow === 'precision' && state.mode !== 'level' && !baseline.complete) {
-    title = '3. Establish the baseline plane';
-    description = 'Switch to Level mode and capture FL, FR, RL, and RR points before precision wheel measurements.';
-    warning = `${baseline.completedSides}/4 baseline points are ready.`;
-  } else if (!levelPrepared && state.mode !== 'level') {
-    warning = 'Switch to Level mode and confirm the floor or car is level before alignment readings.';
-  } else if (!state.calibrationMeta[state.mode]) {
-    title = '2. Set a zero reference';
-    description = guide.calibration;
-    warning = 'This mode is not zeroed yet. Zero it on a known reference for better repeatability.';
-  } else if (!state.orientationOk) {
-    title = `3. Rotate to ${guide.orientation}`;
-    description = `For ${MODE_LABELS[state.mode]}, ${guide.orientation.toLowerCase()} orientation gives a more repeatable placement.`;
-    warning = `Current orientation is ${orientationLabel(state.screenOrientation)}. Rotate to ${guide.orientation}.`;
-  } else if (state.workflow === 'precision' && !(precision.forward && precision.forward.count)) {
-    title = '4. Capture forward readings';
-    description = `Take repeated settled ${state.mode} readings for ${state.selectedSide} with the fixture in its normal orientation.`;
-    warning = 'Forward precision capture set is empty.';
-  } else if (state.workflow === 'precision' && precision.needsReverse && !(precision.reverse && precision.reverse.count)) {
-    title = '5. Capture reversed readings';
-    description = 'Flip the jig or phone in the reversible direction, then capture the same point again to estimate fixture bias.';
-    warning = 'Reversed precision capture set is still missing.';
-  } else if (!state.settled) {
-    title = '4. Hold steady';
-    description = 'The app is averaging recent samples. Keep the phone planted and avoid hand movement until stability turns to Settled.';
-    warning = 'Movement or jitter is still above the settled threshold.';
-  } else if (state.workflow === 'precision') {
-    title = '6. Save the precision report';
-    description = `Review repeatability, reversal bias, and baseline trust before saving ${state.mode} for ${state.selectedSide}.`;
-    warning = `${precision.verdict} • Repeatability ${precision.repeatabilityScore}%`;
-    tone = precision.verdict === 'Good enough for adjustment' ? 'good' : 'warn';
-  } else {
-    title = '5. Save the averaged reading';
-    description = `Reading is settled. Lock it if needed, then save the averaged ${state.mode} value for ${state.selectedSide}.`;
-    warning = 'Consumer-grade sensors are best for repeatable DIY checks, not certified rack alignment.';
-    tone = 'good';
-  }
+  el('workflow-step-title').textContent = title;
+  el('workflow-step-desc').textContent = description;
+  el('guide-placement').textContent = guide.placement;
+  el('guide-orientation').textContent = `Preferred: ${guide.orientation}`;
+  el('guide-side').textContent = `Target side: ${state.selectedSide}`;
 
-  document.getElementById('workflow-step-title').textContent = title;
-  document.getElementById('workflow-step-desc').textContent = description;
-  document.getElementById('guide-placement').textContent = guide.placement;
-  document.getElementById('guide-orientation').textContent = `Preferred: ${guide.orientation}`;
-  document.getElementById('guide-side').textContent = `Target side: ${state.selectedSide}`;
-
-  const warningEl = document.getElementById('warning-text');
+  const warningEl = el('warning-text');
   warningEl.textContent = warning;
   warningEl.className = `warning-text${tone ? ` ${tone}` : ''}`;
 }
@@ -1203,14 +1088,14 @@ function refreshStatus() {
     : `${state.sampleBuffer.length}/${SAMPLE_WINDOW} samples • spread ${formatNumber(range)}°`;
   const orientationText = `${orientationLabel(state.screenOrientation)} ${state.orientationOk ? '✓' : '✕'}`;
 
-  document.getElementById('chip-stability').textContent = stabilityValue;
-  document.getElementById('chip-stability-sub').textContent = stabilitySub;
-  document.getElementById('chip-confidence').textContent = `${state.confidence}%`;
-  document.getElementById('chip-confidence-sub').textContent = `σ ${formatNumber(stdDev)}° • averaged live feed`;
-  document.getElementById('chip-orientation').textContent = orientationText;
-  document.getElementById('chip-orientation-sub').textContent = `Preferred for ${state.mode}: ${MODE_GUIDES[state.mode].orientation}`;
-  document.getElementById('chip-calibration').textContent = calMeta ? formatSigned(calMeta.offset) : 'Not set';
-  document.getElementById('chip-calibration-sub').textContent = calMeta
+  el('chip-stability').textContent = stabilityValue;
+  el('chip-stability-sub').textContent = stabilitySub;
+  el('chip-confidence').textContent = `${state.confidence}%`;
+  el('chip-confidence-sub').textContent = `σ ${formatNumber(stdDev)}° • averaged live feed`;
+  el('chip-orientation').textContent = orientationText;
+  el('chip-orientation-sub').textContent = `Preferred for ${state.mode}: ${MODE_GUIDES[state.mode].orientation}`;
+  el('chip-calibration').textContent = calMeta ? formatSigned(calMeta.offset) : 'Not set';
+  el('chip-calibration-sub').textContent = calMeta
     ? `Zeroed ${formatTime(calMeta.time)} • ${orientationLabel(calMeta.orientation)}`
     : 'Zero this mode first';
 }
@@ -1220,16 +1105,16 @@ function refreshWorkflowMode() {
     tab.classList.toggle('active', tab.dataset.workflow === state.workflow);
     tab.setAttribute('aria-selected', String(tab.dataset.workflow === state.workflow));
   });
-  document.getElementById('precision-card').classList.toggle('hidden-panel', state.workflow !== 'precision');
+  el('precision-card').classList.toggle('hidden-panel', state.workflow !== 'precision');
 }
 
 function refreshGauge() {
   const avg = sampleAverage();
   updateNeedle(avg);
   drawBubble(avg);
-  document.getElementById('gauge-mode-label').textContent = MODE_LABELS[state.mode];
-  document.getElementById('avg-display').textContent = `Avg ${formatSigned(avg)} from ${state.sampleBuffer.length} sample${state.sampleBuffer.length === 1 ? '' : 's'}`;
-  document.getElementById('confidence-label').textContent = state.settled ? `Confidence ${state.confidence}% • Settled` : `Confidence ${state.confidence}% • Live`;
+  el('gauge-mode-label').textContent = MODE_LABELS[state.mode];
+  el('avg-display').textContent = `Avg ${formatSigned(avg)} from ${state.sampleBuffer.length} sample${state.sampleBuffer.length === 1 ? '' : 's'}`;
+  el('confidence-label').textContent = state.settled ? `Confidence ${state.confidence}% • Settled` : `Confidence ${state.confidence}% • Live`;
 }
 
 function refreshCalibrationCard() {
@@ -1241,9 +1126,9 @@ function refreshCalibrationCard() {
     ? `Last set ${formatTime(meta.time)} in ${orientationLabel(meta.orientation)}. Stored locally per mode.`
     : 'Saved locally per mode.';
 
-  document.getElementById('cal-value-text').textContent = valueText;
-  document.getElementById('cal-history-text').textContent = historyText;
-  document.getElementById('btn-reset-cal').disabled = !meta;
+  el('cal-value-text').textContent = valueText;
+  el('cal-history-text').textContent = historyText;
+  el('btn-reset-cal').disabled = !meta;
 }
 
 function refreshPrecisionCard() {
@@ -1251,29 +1136,29 @@ function refreshPrecisionCard() {
   const summary = precisionSummary(state.mode, state.selectedSide);
   const fixture = activeFixture();
 
-  document.getElementById('precision-step-title').textContent = state.mode === 'level'
+  el('precision-step-title').textContent = state.mode === 'level'
     ? 'Precision baseline setup'
     : `Precision ${MODE_LABELS[state.mode]} session`;
-  document.getElementById('precision-step-desc').textContent = state.mode === 'level'
+  el('precision-step-desc').textContent = state.mode === 'level'
     ? 'Capture around-the-car level points until the baseline plane is complete and stable.'
     : 'Use repeated settled captures with the same fixture profile, then add reversed captures if the jig supports it.';
 
-  document.getElementById('device-profile-status').textContent = state.deviceProfile ? 'Ready' : 'Not set';
-  document.getElementById('device-profile-sub').textContent = state.deviceProfile
+  el('device-profile-status').textContent = state.deviceProfile ? 'Ready' : 'Not set';
+  el('device-profile-sub').textContent = state.deviceProfile
     ? `${state.deviceProfile.label} • β ${formatSigned(state.deviceProfile.axisBias.beta)} • γ ${formatSigned(state.deviceProfile.axisBias.gamma)}`
     : 'Capture on a trusted flat or vertical reference.';
-  document.getElementById('fixture-status').textContent = fixture ? fixture.name : 'Not set';
-  document.getElementById('fixture-status-sub').textContent = fixture
+  el('fixture-status').textContent = fixture ? fixture.name : 'Not set';
+  el('fixture-status-sub').textContent = fixture
     ? `${fixture.reversible ? 'Reversible' : 'Single orientation'} • ${fixture.notes || 'No notes'}`
     : 'Use a rigid, reversible jig if possible.';
-  document.getElementById('baseline-status').textContent = baseline.label;
-  document.getElementById('baseline-status-sub').textContent = baseline.complete
+  el('baseline-status').textContent = baseline.label;
+  el('baseline-status-sub').textContent = baseline.complete
     ? `Front ${formatSigned(baseline.frontRearDelta || 0)} • Left ${formatSigned(baseline.leftRightDelta || 0)}`
     : `${baseline.completedSides}/4 points captured in Level mode.`;
-  document.getElementById('precision-trust-status').textContent = summary.verdict;
-  document.getElementById('precision-trust-sub').textContent = `Repeatability ${summary.repeatabilityScore}% • ${summary.needsReverse ? 'Reverse required' : 'Forward-only fixture'}`;
+  el('precision-trust-status').textContent = summary.verdict;
+  el('precision-trust-sub').textContent = `Repeatability ${summary.repeatabilityScore}% • ${summary.needsReverse ? 'Reverse required' : 'Forward-only fixture'}`;
 
-  const fixtureSelect = document.getElementById('fixture-select');
+  const fixtureSelect = el('fixture-select');
   const currentValue = state.precisionSession.fixtureId || '';
   fixtureSelect.textContent = '';
   const placeholder = document.createElement('option');
@@ -1287,14 +1172,14 @@ function refreshPrecisionCard() {
     fixtureSelect.appendChild(option);
   });
   fixtureSelect.value = state.fixtureProfiles.some(item => item.id === currentValue) ? currentValue : '';
-  document.getElementById('fixture-meta-text').textContent = fixture
+  el('fixture-meta-text').textContent = fixture
     ? `${fixture.notes || 'No notes'} • Last used ${formatTime(fixture.lastUsedAt || fixture.createdAt)}`
     : 'Preferred jig: 3-point wheel-face contact, symmetric or reversible, hard registration to the phone.';
 
   SIDES.forEach(side => {
     const stats = baselineStatsForSide(side);
-    const btn = document.getElementById(`baseline-btn-${side}`);
-    const sub = document.getElementById(`baseline-btn-${side}-sub`);
+    const btn = el(`baseline-btn-${side}`);
+    const sub = el(`baseline-btn-${side}-sub`);
     btn.classList.remove('ready', 'partial');
     if (stats?.count >= BASELINE_CAPTURE_TARGET) btn.classList.add('ready');
     else if (stats?.count) btn.classList.add('partial');
@@ -1303,39 +1188,39 @@ function refreshPrecisionCard() {
       : `${stats.count} cap • σ ${formatNumber(stats.stdDev)}°`;
   });
 
-  document.getElementById('precision-target').textContent = `${MODE_LABELS[state.mode]} · ${state.selectedSide}`;
-  document.getElementById('precision-target-sub').textContent = fixture
+  el('precision-target').textContent = `${MODE_LABELS[state.mode]} · ${state.selectedSide}`;
+  el('precision-target-sub').textContent = fixture
     ? `${fixture.name} • ${fixture.reversible ? 'capture both directions' : 'single orientation fixture'}`
     : 'Use the same jig and phone placement for every capture.';
-  document.getElementById('precision-capture-counts').textContent = `${summary.forward?.count || 0} / ${summary.reverse?.count || 0}`;
-  document.getElementById('precision-capture-sub').textContent = summary.needsReverse
+  el('precision-capture-counts').textContent = `${summary.forward?.count || 0} / ${summary.reverse?.count || 0}`;
+  el('precision-capture-sub').textContent = summary.needsReverse
     ? 'Forward count first, reversed count second.'
     : 'Forward count shown first; reverse is optional for this fixture.';
-  document.getElementById('precision-repeatability-value').textContent = `${summary.repeatabilityScore}%`;
-  document.getElementById('precision-repeatability-sub').textContent = summary.forward
+  el('precision-repeatability-value').textContent = `${summary.repeatabilityScore}%`;
+  el('precision-repeatability-sub').textContent = summary.forward
     ? `Forward σ ${formatNumber(summary.forward.stdDev)}°${summary.reverse ? ` • Reverse σ ${formatNumber(summary.reverse.stdDev)}°` : ''}`
     : 'Settled spread and repeated agreement drive this score.';
-  document.getElementById('precision-bias-value').textContent = summary.reversalBias === null ? 'Pending' : formatSigned(summary.reversalBias);
-  document.getElementById('precision-bias-sub').textContent = summary.reversalBias === null
+  el('precision-bias-value').textContent = summary.reversalBias === null ? 'Pending' : formatSigned(summary.reversalBias);
+  el('precision-bias-sub').textContent = summary.reversalBias === null
     ? 'Capture a reversed set to estimate mounting bias.'
     : `Baseline compensation ${formatSigned(summary.baselineCompensation)}`;
-  document.getElementById('precision-baseline-plane').textContent = baseline.complete
+  el('precision-baseline-plane').textContent = baseline.complete
     ? `${formatSigned(baseline.leftRightDelta || 0)} L-R`
     : `${baseline.completedSides}/4 ready`;
-  document.getElementById('precision-baseline-plane-sub').textContent = baseline.complete
+  el('precision-baseline-plane-sub').textContent = baseline.complete
     ? `Front-Rear ${formatSigned(baseline.frontRearDelta || 0)} • ${baseline.label}`
     : 'Front/rear and left/right averages from Level mode.';
-  document.getElementById('precision-final-value').textContent = Number.isFinite(summary.finalValue) ? formatSigned(summary.finalValue) : '—';
-  document.getElementById('precision-final-sub').textContent = `${summary.verdict}${Number.isFinite(summary.reversalCorrectedValue) ? ` • corrected ${formatSigned(summary.reversalCorrectedValue)}` : ''}`;
-  document.getElementById('btn-save-precision').disabled = !summary.readyToSave || !Number.isFinite(summary.finalValue);
+  el('precision-final-value').textContent = Number.isFinite(summary.finalValue) ? formatSigned(summary.finalValue) : '—';
+  el('precision-final-sub').textContent = `${summary.verdict}${Number.isFinite(summary.reversalCorrectedValue) ? ` • corrected ${formatSigned(summary.reversalCorrectedValue)}` : ''}`;
+  el('btn-save-precision').disabled = !summary.readyToSave || !Number.isFinite(summary.finalValue);
 }
 
 function refreshLockButton() {
-  const btn = document.getElementById('btn-lock');
+  const btn = el('btn-lock');
   btn.textContent = state.locked ? 'Resume Live' : 'Lock';
   btn.className = `btn btn-small ${state.locked ? 'btn-warning' : 'btn-surface'}`;
   btn.title = state.locked ? 'Resume live reading' : 'Lock reading';
-  const saveBtn = document.getElementById('btn-save');
+  const saveBtn = el('btn-save');
   saveBtn.textContent = state.workflow === 'precision' ? 'Save Precision' : 'Save Avg';
   if (state.workflow === 'precision') {
     const summary = precisionSummary(state.mode, state.selectedSide);
@@ -1352,9 +1237,9 @@ function refreshSavedReadings() {
   });
 
   const current = measurementFor(state.mode, state.selectedSide);
-  document.getElementById('saved-side-title').textContent = `${MODE_LABELS[state.mode]} · ${state.selectedSide}`;
-  document.getElementById('saved-side-value').textContent = current ? formatSigned(current.value) : 'No saved reading';
-  document.getElementById('saved-side-note').textContent = current
+  el('saved-side-title').textContent = `${MODE_LABELS[state.mode]} · ${state.selectedSide}`;
+  el('saved-side-value').textContent = current ? formatSigned(current.value) : 'No saved reading';
+  el('saved-side-note').textContent = current
     ? [
         `Saved ${formatTime(current.time)}`,
         current.workflow === 'precision' ? `precision ${current.repeatabilityScore || 0}%` : `${current.confidence}% confidence`,
@@ -1364,12 +1249,12 @@ function refreshSavedReadings() {
 
   const frontDelta = deltaFor(state.mode, 'FL', 'FR');
   const rearDelta = deltaFor(state.mode, 'RL', 'RR');
-  document.getElementById('front-delta').textContent = frontDelta === null ? '—' : formatSigned(frontDelta);
-  document.getElementById('front-delta-note').textContent = frontDelta === null ? 'Save both front sides for this mode.' : 'A negative delta means FL is smaller than FR.';
-  document.getElementById('rear-delta').textContent = rearDelta === null ? '—' : formatSigned(rearDelta);
-  document.getElementById('rear-delta-note').textContent = rearDelta === null ? 'Save both rear sides for this mode.' : 'A negative delta means RL is smaller than RR.';
+  el('front-delta').textContent = frontDelta === null ? '—' : formatSigned(frontDelta);
+  el('front-delta-note').textContent = frontDelta === null ? 'Save both front sides for this mode.' : 'A negative delta means FL is smaller than FR.';
+  el('rear-delta').textContent = rearDelta === null ? '—' : formatSigned(rearDelta);
+  el('rear-delta-note').textContent = rearDelta === null ? 'Save both rear sides for this mode.' : 'A negative delta means RL is smaller than RR.';
 
-  const list = document.getElementById('saved-list');
+  const list = el('saved-list');
   const readings = SIDES
     .map(side => measurementFor(state.mode, side))
     .filter(Boolean)
@@ -1407,12 +1292,12 @@ function refreshSavedReadings() {
 }
 
 function refreshAdvanced() {
-  document.getElementById('raw-alpha').textContent = `${formatNumber(state.alpha)}°`;
-  document.getElementById('raw-beta').textContent = `${formatNumber(state.beta)}°`;
-  document.getElementById('raw-gamma').textContent = `${formatNumber(state.gamma)}°`;
-  document.getElementById('sample-spread').textContent = `${formatNumber(sampleRange())}° range • ${formatNumber(sampleStdDev())}° σ`;
+  el('raw-alpha').textContent = `${formatNumber(state.alpha)}°`;
+  el('raw-beta').textContent = `${formatNumber(state.beta)}°`;
+  el('raw-gamma').textContent = `${formatNumber(state.gamma)}°`;
+  el('sample-spread').textContent = `${formatNumber(sampleRange())}° range • ${formatNumber(sampleStdDev())}° σ`;
 
-  const list = document.getElementById('mode-cal-list');
+  const list = el('mode-cal-list');
   list.textContent = '';
   MODES.forEach(mode => {
     const meta = state.calibrationMeta[mode];
@@ -1499,10 +1384,13 @@ function setupEventHandlers() {
     if (handler) handler();
   });
 
-  const fixtureSelect = document.getElementById('fixture-select');
+  const fixtureSelect = el('fixture-select');
   fixtureSelect.addEventListener('change', event => {
     selectFixture(event.target.value);
   });
+
+  el('fixture-form').addEventListener('submit', handleFixtureFormSubmit);
+  el('fixture-form-cancel').addEventListener('click', closeFixtureDialog);
 }
 
 function registerServiceWorker() {
@@ -1520,7 +1408,14 @@ function registerServiceWorker() {
   initGaugeSVG();
   setupEventHandlers();
   registerServiceWorker();
-  window.addEventListener('resize', refreshUI);
+  const handleOrientationFlip = () => {
+    const nextOrientation = currentOrientation();
+    if (nextOrientation !== state.screenOrientation) {
+      resetLiveAveraging();
+    }
+    refreshUI();
+  };
+  window.addEventListener('resize', handleOrientationFlip);
   window.addEventListener('orientationchange', () => {
     resetLiveAveraging();
     refreshUI();
