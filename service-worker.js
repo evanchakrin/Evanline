@@ -42,7 +42,7 @@ self.addEventListener('fetch', event => {
         if (cached) return cached;
         const fallback = await caches.match('./index.html');
         if (fallback) return fallback;
-        console.warn('Navigation request failed with no cached fallback.', error);
+        console.warn('Navigation request failed with no cached fallback.', event.request.url, error);
         return Response.error();
       })
     );
@@ -54,6 +54,9 @@ self.addEventListener('fetch', event => {
       const copy = response.clone();
       caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
       return response;
-    }).catch(() => Response.error()))
+    }).catch(error => {
+      console.warn('Asset request failed.', event.request.url, error);
+      return Response.error();
+    }))
   );
 });
