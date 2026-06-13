@@ -34,11 +34,8 @@ self.addEventListener('fetch', event => {
   if (event.request.mode === 'navigate') {
     event.respondWith(
       fetch(event.request).then(response => {
-        const requestCopy = response.clone();
-        const fallbackCopy = response.clone();
         caches.open(CACHE_NAME).then(cache => {
-          cache.put(event.request, requestCopy);
-          cache.put('./index.html', fallbackCopy);
+          cache.put(event.request, response.clone());
         });
         return response;
       }).catch(() => caches.match(event.request).then(cached => cached || caches.match('./index.html')))
@@ -51,6 +48,6 @@ self.addEventListener('fetch', event => {
       const copy = response.clone();
       caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
       return response;
-    }).catch(() => caches.match('./index.html')))
+    }).catch(() => Response.error()))
   );
 });
