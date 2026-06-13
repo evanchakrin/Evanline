@@ -39,6 +39,7 @@
       pointer-events: none;
       transform: translateY(20px);
     }
+    .screen.hidden-done { display: none; }
 
     #screen-welcome {
       gap: 32px;
@@ -378,8 +379,8 @@
       opacity: 0;
       transition: opacity 0.3s;
     }
-    .aligned-badge:not(.visible) { display: none; }
-    .aligned-badge.visible { display: inline-flex; opacity: 1; }
+    .aligned-badge:not(.visible) { visibility: hidden; }
+    .aligned-badge.visible { visibility: visible; opacity: 1; }
 
     .level-wrap {
       width: 100%;

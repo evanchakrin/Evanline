@@ -9,7 +9,7 @@
   <meta name="theme-color" content="#0d1117" />
   <link rel="manifest" href="manifest.json" />
   <title>Evanline – Wheel Alignment</title>
-    <link rel="stylesheet" href="assets/css/styles.css" />
+    <link rel="stylesheet" href="assets/css/styles.css?v=3" />
 
 </head>
 <body>
@@ -54,7 +54,7 @@
   <button class="btn btn-ghost" data-action="showInstructions">How to use</button>
 </div>
 
-<div id="screen-main" class="screen hidden">
+<div id="screen-main" class="screen hidden hidden-done" aria-hidden="true" inert>
   <div class="app-header">
     <h1>Evanline</h1>
     <div class="header-btns">
@@ -387,7 +387,7 @@
   </details>
 </div>
 
-<div id="screen-instructions" class="screen hidden">
+<div id="screen-instructions" class="screen hidden hidden-done" aria-hidden="true" inert>
   <div class="instr-header">
     <h2>How to Use</h2>
     <button class="btn btn-ghost btn-small" id="btn-back-instr" data-action="backFromInstructions">← Back</button>
@@ -480,7 +480,7 @@
   <div class="instr-spacer"></div>
 </div>
 
-<script type="module" src="assets/js/app.js"></script>
+<script type="module" src="assets/js/app.js?v=3"></script>
 
 <dialog id="fixture-dialog" class="fixture-dialog" aria-labelledby="fixture-dialog-title">
   <form method="dialog" id="fixture-form" class="fixture-form">

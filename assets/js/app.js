@@ -132,7 +132,7 @@ function measurementKey(mode, side) {
 
 function el(id) {
   const node = document.getElementById(id);
-  if (!node) throw new Error(`Missing required element #${id}`);
+  if (!node) throw new Error(`Element #${id} not found in DOM. Verify the ID is correct and the element exists.`);
   return node;
 }
 
@@ -712,10 +712,30 @@ function hideSensorBanner() {
 function showScreen(id) {
   document.querySelectorAll('.screen').forEach(screen => {
     const hidden = screen.id !== id;
-    screen.classList.toggle('hidden', hidden);
     screen.setAttribute('aria-hidden', String(hidden));
     screen.inert = hidden;
+    if (screen.hideTimer) {
+      window.clearTimeout(screen.hideTimer);
+      screen.hideTimer = 0;
+    }
+    if (hidden) {
+      screen.classList.add('hidden');
+      screen.hideTimer = window.setTimeout(() => {
+        screen.classList.add('hidden-done');
+        screen.hideTimer = 0;
+      }, 350);
+    } else {
+      screen.classList.remove('hidden-done');
+      window.requestAnimationFrame(() => {
+        screen.classList.remove('hidden');
+      });
+    }
   });
+}
+
+function syncScreenVisibility() {
+  const visibleScreen = document.querySelector('.screen:not(.hidden)')?.id || 'screen-welcome';
+  showScreen(visibleScreen);
 }
 
 function startApp() {
@@ -1601,7 +1621,7 @@ function registerServiceWorker() {
   initGaugeSVG();
   setupEventHandlers();
   registerServiceWorker();
-  showScreen('screen-welcome');
+  syncScreenVisibility();
   const handleOrientationFlip = () => {
     const nextOrientation = currentOrientation();
     if (nextOrientation !== state.screenOrientation) {
