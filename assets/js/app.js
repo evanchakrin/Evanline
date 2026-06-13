@@ -93,6 +93,7 @@ const state = {
   settledStart: 0,
   aligned: false,
   alignedStart: 0,
+  // locked freezes the current reading for save/review; sensorListenerAttached is the actual telemetry on/off state.
   locked: false,
   sensorsAvailable: false,
   sensorListenerAttached: false,
@@ -652,6 +653,7 @@ function detachSensorListener() {
 }
 
 function pauseSensors() {
+  // Pausing intentionally both freezes the latest reading and detaches telemetry until Start Measuring is tapped.
   state.locked = true;
   detachSensorListener();
 }

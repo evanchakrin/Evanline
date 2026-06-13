@@ -28,15 +28,16 @@
     .screen {
       position: fixed;
       inset: 0;
-      /* 100vh is the fallback; 100dvh keeps content inside mobile browser bars. */
       height: 100vh;
-      height: 100dvh;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
       padding: max(16px, env(safe-area-inset-top)) 24px max(16px, env(safe-area-inset-bottom));
       transition: opacity 0.35s ease, transform 0.35s ease;
+    }
+    @supports (height: 100dvh) {
+      .screen { height: 100dvh; }
     }
     .screen.hidden {
       opacity: 0;
