@@ -9,7 +9,7 @@
   <meta name="theme-color" content="#0d1117" />
   <link rel="manifest" href="manifest.json" />
   <title>Evanline – Wheel Alignment</title>
-    <link rel="stylesheet" href="assets/css/styles.css" />
+    <link rel="stylesheet" href="assets/css/styles.css?v=3" />
 
 </head>
 <body>
@@ -38,6 +38,12 @@
     Use your iPhone's built-in sensors to measure wheel camber, toe, vehicle level, and pitch — with smoothing, settled detection, and saved side-by-side comparisons.
   </p>
 
+  <div class="welcome-steps" aria-label="Setup preview">
+    <span>1. Enable motion access</span>
+    <span>2. Match the guided orientation</span>
+    <span>3. Zero, settle, then save</span>
+  </div>
+
   <button class="btn btn-primary" id="btn-start" data-action="startApp">
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
       <circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/>
@@ -48,7 +54,7 @@
   <button class="btn btn-ghost" data-action="showInstructions">How to use</button>
 </div>
 
-<div id="screen-main" class="screen hidden">
+<div id="screen-main" class="screen hidden hidden-done" aria-hidden="true" inert>
   <div class="app-header">
     <h1>Evanline</h1>
     <div class="header-btns">
@@ -58,7 +64,9 @@
   </div>
 
   <div id="sensor-banner" role="status" aria-live="polite">
-    ⚠️ Motion sensors not available. Please open this page in Safari on an iPhone and grant sensor access.
+    <strong>⚠️ Motion sensors are not active.</strong>
+    <span>Open in Safari on iPhone, use HTTPS or localhost, and grant motion access when prompted.</span>
+    <button class="btn btn-warning btn-small" data-action="retrySensors">Retry sensor access</button>
   </div>
 
   <div class="workflow-tabs" role="tablist" aria-label="Workflow selection">
@@ -75,6 +83,14 @@
 
   <div class="gauge-card guide-card">
     <span class="gauge-label">Guided workflow</span>
+    <div class="guide-progress" aria-label="Guided workflow progress">
+      <span class="guide-dot active" data-guide-dot="1">1</span>
+      <span class="guide-dot" data-guide-dot="2">2</span>
+      <span class="guide-dot" data-guide-dot="3">3</span>
+      <span class="guide-dot" data-guide-dot="4">4</span>
+      <span class="guide-dot" data-guide-dot="5">5</span>
+      <span class="guide-dot" data-guide-dot="6">6</span>
+    </div>
     <div class="guide-step" id="workflow-step-title">1. Verify level surface</div>
     <p class="guide-text" id="workflow-step-desc">Use Level mode before alignment readings so your baseline is trustworthy.</p>
     <div class="guide-meta">
@@ -83,12 +99,38 @@
       <span class="guide-pill" id="guide-side">Target side: FL</span>
     </div>
     <div class="warning-text" id="warning-text" role="status" aria-live="polite">Waiting for sensor permission.</div>
+    <button class="btn btn-primary btn-small guide-action" id="guide-action" data-action="performGuideAction">Next action</button>
+  </div>
+
+  <div class="readiness-strip" aria-label="Session readiness summary">
+    <div class="readiness-pill">
+      <span>Live</span>
+      <strong id="readiness-live">Waiting</strong>
+      <small id="readiness-live-sub">Need samples</small>
+    </div>
+    <div class="readiness-pill">
+      <span>Save</span>
+      <strong id="readiness-save">Blocked</strong>
+      <small id="readiness-save-sub">Hold steady</small>
+    </div>
+    <div class="readiness-pill">
+      <span>Next</span>
+      <strong id="readiness-next">Enable sensors</strong>
+      <small id="readiness-next-sub">Follow the guide</small>
+    </div>
   </div>
 
   <div class="gauge-card precision-card hidden-panel" id="precision-card">
     <span class="gauge-label">High-accuracy session</span>
     <div class="guide-step" id="precision-step-title">1. Calibrate the device and fixture</div>
     <p class="guide-text" id="precision-step-desc">Precision mode uses a shared session with device bias, fixture profile, level references, reversal captures, and repeatability checks.</p>
+
+    <div class="precision-summary" aria-label="Precision readiness summary">
+      <span id="precision-summary-device">Device —</span>
+      <span id="precision-summary-fixture">Fixture —</span>
+      <span id="precision-summary-baseline">Baseline 0/4</span>
+      <span id="precision-summary-trust">Trust —</span>
+    </div>
 
     <div class="precision-grid">
       <div class="status-chip">
@@ -113,71 +155,89 @@
       </div>
     </div>
 
-    <div class="precision-section-title">Fixture profile</div>
-    <div class="fixture-row">
-      <select class="form-select" id="fixture-select" data-action="selectFixture">
-        <option value="">No saved fixture yet</option>
-      </select>
-      <button class="btn btn-surface btn-small" data-action="createOrUpdateFixture">Save fixture</button>
-    </div>
-    <div class="fixture-meta" id="fixture-meta-text">Preferred jig: 3-point wheel-face contact, symmetric or reversible, hard registration to the phone.</div>
+    <details class="panel-section" open>
+      <summary>Fixture and device setup</summary>
+      <div class="panel-section-content">
+        <div class="fixture-row">
+          <select class="form-select" id="fixture-select" data-action="selectFixture">
+            <option value="">No saved fixture yet</option>
+          </select>
+          <button class="btn btn-surface btn-small" data-action="createOrUpdateFixture">Save fixture</button>
+        </div>
+        <div class="fixture-meta" id="fixture-meta-text">Preferred jig: 3-point wheel-face contact, symmetric or reversible, hard registration to the phone.</div>
 
-    <div class="precision-action-row">
-      <button class="btn btn-surface btn-small" data-action="captureDeviceCalibration">Capture device ref</button>
-      <button class="btn btn-surface btn-small" data-action="resetPrecisionSession">Reset session</button>
-      <button class="btn btn-surface btn-small" data-action="resetDeviceCalibration">Reset device ref</button>
-    </div>
+        <div class="precision-action-row">
+          <button class="btn btn-surface btn-small" id="btn-capture-device" data-action="captureDeviceCalibration">Capture device ref</button>
+          <button class="btn btn-surface btn-small" data-action="resetPrecisionSession">Reset session</button>
+          <button class="btn btn-surface btn-small" data-action="resetDeviceCalibration">Reset device ref</button>
+        </div>
+      </div>
+    </details>
 
-    <div class="precision-section-title">Around-the-car baseline</div>
-    <div class="baseline-grid">
-      <button class="point-btn" id="baseline-btn-FL" data-action="captureBaselinePoint" data-arg="FL">FL<small id="baseline-btn-FL-sub">0 captures</small></button>
-      <button class="point-btn" id="baseline-btn-FR" data-action="captureBaselinePoint" data-arg="FR">FR<small id="baseline-btn-FR-sub">0 captures</small></button>
-      <button class="point-btn" id="baseline-btn-RL" data-action="captureBaselinePoint" data-arg="RL">RL<small id="baseline-btn-RL-sub">0 captures</small></button>
-      <button class="point-btn" id="baseline-btn-RR" data-action="captureBaselinePoint" data-arg="RR">RR<small id="baseline-btn-RR-sub">0 captures</small></button>
-    </div>
+    <details class="panel-section" open>
+      <summary>Around-the-car baseline</summary>
+      <div class="panel-section-content">
+        <div class="baseline-grid">
+          <button class="point-btn" id="baseline-btn-FL" data-action="captureBaselinePoint" data-arg="FL">FL<small id="baseline-btn-FL-sub">0 captures</small></button>
+          <button class="point-btn" id="baseline-btn-FR" data-action="captureBaselinePoint" data-arg="FR">FR<small id="baseline-btn-FR-sub">0 captures</small></button>
+          <button class="point-btn" id="baseline-btn-RL" data-action="captureBaselinePoint" data-arg="RL">RL<small id="baseline-btn-RL-sub">0 captures</small></button>
+          <button class="point-btn" id="baseline-btn-RR" data-action="captureBaselinePoint" data-arg="RR">RR<small id="baseline-btn-RR-sub">0 captures</small></button>
+        </div>
+      </div>
+    </details>
 
-    <div class="precision-section-title">Target capture set</div>
-    <div class="comparison-grid">
-      <div class="comparison-item">
-        <span>Target</span>
-        <strong id="precision-target">Camber · FL</strong>
-        <small id="precision-target-sub">Use the same jig and phone placement for every capture.</small>
-      </div>
-      <div class="comparison-item">
-        <span>Forward / Reverse</span>
-        <strong id="precision-capture-counts">0 / 0</strong>
-        <small id="precision-capture-sub">Capture repeated settled readings before saving.</small>
-      </div>
-    </div>
+    <details class="panel-section" open>
+      <summary>Target capture set</summary>
+      <div class="panel-section-content">
+        <div class="comparison-grid">
+          <div class="comparison-item">
+            <span>Target</span>
+            <strong id="precision-target">Camber · FL</strong>
+            <small id="precision-target-sub">Use the same jig and phone placement for every capture.</small>
+          </div>
+          <div class="comparison-item">
+            <span>Forward / Reverse</span>
+            <strong id="precision-capture-counts">0 / 0</strong>
+            <small id="precision-capture-sub">Capture repeated settled readings before saving.</small>
+          </div>
+        </div>
 
-    <div class="precision-action-row">
-      <button class="btn btn-success btn-small" data-action="capturePrecisionReading" data-arg="forward">Capture forward</button>
-      <button class="btn btn-warning btn-small" data-action="capturePrecisionReading" data-arg="reverse">Capture reversed</button>
-      <button class="btn btn-primary btn-small" id="btn-save-precision" data-action="savePrecisionMeasurement">Save precision</button>
-    </div>
+        <div class="precision-action-row">
+          <button class="btn btn-success btn-small" id="btn-capture-forward" data-action="capturePrecisionReading" data-arg="forward">Capture forward</button>
+          <button class="btn btn-warning btn-small" id="btn-capture-reverse" data-action="capturePrecisionReading" data-arg="reverse">Capture reversed</button>
+          <button class="btn btn-primary btn-small" id="btn-save-precision" data-action="savePrecisionMeasurement">Save precision</button>
+        </div>
+        <div class="control-hint" id="precision-control-hint">Save unlocks after the required capture sets are ready.</div>
+      </div>
+    </details>
 
-    <div class="precision-grid">
-      <div class="comparison-item">
-        <span>Repeatability</span>
-        <strong id="precision-repeatability-value">—</strong>
-        <small id="precision-repeatability-sub">Settled spread and repeated agreement drive this score.</small>
+    <details class="panel-section">
+      <summary>Report details</summary>
+      <div class="panel-section-content">
+        <div class="precision-grid">
+          <div class="comparison-item">
+            <span>Repeatability</span>
+            <strong id="precision-repeatability-value">—</strong>
+            <small id="precision-repeatability-sub">Settled spread and repeated agreement drive this score.</small>
+          </div>
+          <div class="comparison-item">
+            <span>Reversal bias</span>
+            <strong id="precision-bias-value">—</strong>
+            <small id="precision-bias-sub">Forward + reversed pairs expose mounting bias.</small>
+          </div>
+          <div class="comparison-item">
+            <span>Baseline plane</span>
+            <strong id="precision-baseline-plane">—</strong>
+            <small id="precision-baseline-plane-sub">Front/rear and left/right averages from Level mode.</small>
+          </div>
+          <div class="comparison-item">
+            <span>Final report</span>
+            <strong id="precision-final-value">—</strong>
+            <small id="precision-final-sub">Final values appear with a trust verdict, not by themselves.</small>
+          </div>
+        </div>
       </div>
-      <div class="comparison-item">
-        <span>Reversal bias</span>
-        <strong id="precision-bias-value">—</strong>
-        <small id="precision-bias-sub">Forward + reversed pairs expose mounting bias.</small>
-      </div>
-      <div class="comparison-item">
-        <span>Baseline plane</span>
-        <strong id="precision-baseline-plane">—</strong>
-        <small id="precision-baseline-plane-sub">Front/rear and left/right averages from Level mode.</small>
-      </div>
-      <div class="comparison-item">
-        <span>Final report</span>
-        <strong id="precision-final-value">—</strong>
-        <small id="precision-final-sub">Final values appear with a trust verdict, not by themselves.</small>
-      </div>
-    </div>
+    </details>
   </div>
 
   <div class="gauge-card">
@@ -204,13 +264,13 @@
       <text id="svg-aligned-text" x="150" y="162" text-anchor="middle" fill="#3fb950" font-size="11" font-family="-apple-system,sans-serif" font-weight="600" opacity="0"></text>
     </svg>
 
-    <div style="display:flex;flex-direction:column;align-items:center;gap:6px;">
+    <div class="angle-readout-col">
       <div class="angle-readout">
         <span class="angle-value" id="angle-display" aria-live="polite">0.00</span>
         <span class="angle-unit">°</span>
       </div>
       <span class="angle-direction" id="angle-direction">—</span>
-      <div class="aligned-badge" id="aligned-badge">
+      <div class="aligned-badge" id="aligned-badge" aria-hidden="true">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
         Settled &amp; aligned
       </div>
@@ -256,6 +316,8 @@
     <button class="btn btn-primary btn-small" id="btn-save" data-action="saveMeasurement">Save Avg</button>
     <button class="btn btn-surface btn-small" id="btn-reset-cal" data-action="resetCalibration">Reset Zero</button>
   </div>
+  <div class="control-hint" id="quick-control-hint">Save unlocks when the reading is settled.</div>
+  <div class="save-confirmation hidden-panel" id="save-confirmation" role="status" aria-live="polite"></div>
 
   <div class="cal-card" id="cal-card">
     <div class="cal-info">
@@ -325,7 +387,7 @@
   </details>
 </div>
 
-<div id="screen-instructions" class="screen hidden">
+<div id="screen-instructions" class="screen hidden hidden-done" aria-hidden="true" inert>
   <div class="instr-header">
     <h2>How to Use</h2>
     <button class="btn btn-ghost btn-small" id="btn-back-instr" data-action="backFromInstructions">← Back</button>
@@ -393,21 +455,21 @@
   <p class="instr-section-title">Important Notes</p>
   <div class="step-list">
     <div class="step-item">
-      <div class="step-num" style="background:var(--yellow)">!</div>
+      <div class="step-num step-num-warn">!</div>
       <div class="step-body">
         <span class="step-title">3D-printed jig expectations</span>
         <span class="step-desc">Aim for rigid 3-point wheel-face contact, avoid tire sidewalls, make the jig symmetric or reversible, and add hard phone registration so each re-seat lands in the same place.</span>
       </div>
     </div>
     <div class="step-item">
-      <div class="step-num" style="background:var(--yellow)">!</div>
+      <div class="step-num step-num-warn">!</div>
       <div class="step-body">
         <span class="step-title">Consumer-grade sensors still need real-world validation</span>
         <span class="step-desc">Phone sensors can be very repeatable with a disciplined workflow, but you should still benchmark your setup against a digital angle gauge or professional rack before trusting adjustment values.</span>
       </div>
     </div>
     <div class="step-item">
-      <div class="step-num" style="background:var(--yellow)">!</div>
+      <div class="step-num step-num-warn">!</div>
       <div class="step-body">
         <span class="step-title">Safari on iPhone required</span>
         <span class="step-desc">Motion sensors require Safari on iPhone (iOS 13+). You must tap “Enable Sensors &amp; Start” and approve the permission prompt.</span>
@@ -415,10 +477,32 @@
     </div>
   </div>
 
-  <div style="height:40px;"></div>
+  <div class="instr-spacer"></div>
 </div>
 
-<script type="module" src="assets/js/app.js"></script>
+<script type="module" src="assets/js/app.js?v=3"></script>
+
+<dialog id="fixture-dialog" class="fixture-dialog" aria-labelledby="fixture-dialog-title">
+  <form method="dialog" id="fixture-form" class="fixture-form">
+    <h3 id="fixture-dialog-title">Fixture profile</h3>
+    <label class="fixture-field">
+      <span>Name</span>
+      <input type="text" id="fixture-form-name" required maxlength="60" autocomplete="off" />
+    </label>
+    <label class="fixture-field">
+      <span>Notes (contact points, wheel type, printed jig version)</span>
+      <textarea id="fixture-form-notes" rows="3" maxlength="240"></textarea>
+    </label>
+    <label class="fixture-field fixture-checkbox">
+      <input type="checkbox" id="fixture-form-reversible" />
+      <span>Can this fixture be flipped or mirrored for reversal checks?</span>
+    </label>
+    <div class="fixture-form-actions">
+      <button type="button" class="btn btn-surface btn-small" id="fixture-form-cancel" value="cancel">Cancel</button>
+      <button type="submit" class="btn btn-primary btn-small" value="save">Save fixture</button>
+    </div>
+  </form>
+</dialog>
 
 </body>
 </html>

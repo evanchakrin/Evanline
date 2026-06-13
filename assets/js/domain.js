@@ -18,7 +18,7 @@ export function polarPoint(cx, cy, r, angleDeg) {
 export function buildArcPath(cx, cy, r, startDeg, endDeg) {
   const start = polarPoint(cx, cy, r, startDeg);
   const end = polarPoint(cx, cy, r, endDeg);
-  const largeArcFlag = (endDeg - startDeg) > 180 ? 1 : 0;
+  const largeArcFlag = (endDeg - startDeg) >= 180 ? 1 : 0;
   return `M ${start.x} ${start.y} A ${r} ${r} 0 ${largeArcFlag} 1 ${end.x} ${end.y}`;
 }
 
@@ -35,18 +35,14 @@ export function standardDeviation(values = []) {
 }
 
 export function captureSeriesStats(series = []) {
-  if (!series.length) {
-    return { avg: null, range: null, stdDev: null, min: null, max: null };
-  }
+  if (!series.length) return null;
   const values = series.map(item => item.value);
-  const min = Math.min(...values);
-  const max = Math.max(...values);
   return {
-    avg: average(values),
-    range: max - min,
+    count: series.length,
+    mean: average(values),
+    range: Math.max(...values) - Math.min(...values),
     stdDev: standardDeviation(values),
-    min,
-    max,
+    latest: series[series.length - 1],
   };
 }
 
