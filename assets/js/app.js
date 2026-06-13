@@ -714,6 +714,7 @@ function showScreen(id) {
     const hidden = screen.id !== id;
     screen.classList.toggle('hidden', hidden);
     screen.setAttribute('aria-hidden', String(hidden));
+    screen.inert = hidden;
   });
 }
 
@@ -1600,6 +1601,7 @@ function registerServiceWorker() {
   initGaugeSVG();
   setupEventHandlers();
   registerServiceWorker();
+  showScreen('screen-welcome');
   const handleOrientationFlip = () => {
     const nextOrientation = currentOrientation();
     if (nextOrientation !== state.screenOrientation) {
