@@ -17,7 +17,7 @@ import {
 
 // v3 adds workflow/session objects beyond the older v2 zero + readings payload, so loadState() migrates legacy data forward on first read.
 const STORAGE_KEY = 'evanline-state-v3';
-const MODES = ['camber', 'toe', 'level', 'pitch'];
+const MODES = ['level', 'camber', 'toe', 'pitch'];
 const SIDES = ['FL', 'FR', 'RL', 'RR'];
 const MAX_STORED_MEASUREMENTS = 32;
 const MAX_FIXTURE_PROFILES = 12;
@@ -76,7 +76,7 @@ const PRECISION_CAPTURE_TARGET = 3;
 const BASELINE_CAPTURE_TARGET = 2;
 
 const state = {
-  mode: 'camber',
+  mode: 'level',
   workflow: 'quick',
   alpha: 0,
   beta: 0,
@@ -93,6 +93,7 @@ const state = {
   settledStart: 0,
   aligned: false,
   alignedStart: 0,
+  // locked freezes the current reading for save/review; sensorListenerAttached is the actual telemetry on/off state.
   locked: false,
   sensorsAvailable: false,
   sensorListenerAttached: false,
@@ -302,14 +303,15 @@ function updateNeedle(angleDeg) {
 }
 
 function directionLabel(angleDeg) {
+  // Keep branches aligned with MODES order so tab/default workflow ordering stays easy to scan.
+  if (state.mode === 'level') {
+    return angleDeg > DIRECTION_DEADBAND_DEG ? '↗ Tilts Right' : angleDeg < -DIRECTION_DEADBAND_DEG ? '↖ Tilts Left' : '— Level';
+  }
   if (state.mode === 'camber') {
     return angleDeg > DIRECTION_DEADBAND_DEG ? '▲ Positive Camber' : angleDeg < -DIRECTION_DEADBAND_DEG ? '▼ Negative Camber' : '— Zero Camber';
   }
   if (state.mode === 'toe') {
     return angleDeg > DIRECTION_DEADBAND_DEG ? '→ Toe Out' : angleDeg < -DIRECTION_DEADBAND_DEG ? '← Toe In' : '— Neutral';
-  }
-  if (state.mode === 'level') {
-    return angleDeg > DIRECTION_DEADBAND_DEG ? '↗ Tilts Right' : angleDeg < -DIRECTION_DEADBAND_DEG ? '↖ Tilts Left' : '— Level';
   }
   return angleDeg > DIRECTION_DEADBAND_DEG ? '↑ Nose Up' : angleDeg < -DIRECTION_DEADBAND_DEG ? '↓ Nose Down' : '— Flat';
 }
@@ -645,6 +647,18 @@ function attachSensorListener() {
   state.sensorListenerAttached = true;
 }
 
+function detachSensorListener() {
+  if (!state.sensorListenerAttached) return;
+  window.removeEventListener('deviceorientation', onOrientation, true);
+  state.sensorListenerAttached = false;
+}
+
+function pauseSensors() {
+  // Pausing intentionally both freezes the latest reading and detaches telemetry until Start Measuring is tapped.
+  state.locked = true;
+  detachSensorListener();
+}
+
 function onOrientation(event) {
   if (state.locked) return;
 
@@ -671,6 +685,8 @@ function requestSensors(callback) {
     DeviceOrientationEvent.requestPermission()
       .then(response => {
         if (response === 'granted') {
+          state.locked = false;
+          resetLiveAveraging();
           attachSensorListener();
           state.sensorsAvailable = true;
           hideSensorBanner();
@@ -688,6 +704,8 @@ function requestSensors(callback) {
         if (callback) callback(false);
       });
   } else if (typeof DeviceOrientationEvent !== 'undefined') {
+    state.locked = false;
+    resetLiveAveraging();
     attachSensorListener();
     state.sensorsAvailable = true;
     hideSensorBanner();
@@ -751,7 +769,7 @@ function startApp() {
 function retrySensors() {
   requestSensors(ok => {
     if (ok) {
-      setNotice('Motion sensors are active. Keep the phone planted until the reading settles.', 'good');
+      setNotice('Measurement started. Keep the phone planted until the reading settles.', 'good');
     } else {
       setNotice('Sensor access is still blocked. Confirm Safari, HTTPS or localhost, and motion permission settings.', 'warn');
     }
@@ -761,7 +779,12 @@ function retrySensors() {
 
 function showInstructions() {
   state.prevScreen = document.querySelector('.screen:not(.hidden)')?.id || 'screen-welcome';
+  if (state.sensorListenerAttached) {
+    // Instructions are a non-measurement screen; users restart telemetry explicitly with Start Measuring.
+    pauseSensors();
+  }
   showScreen('screen-instructions');
+  refreshUI();
 }
 
 function backFromInstructions() {
@@ -898,6 +921,11 @@ function resetDeviceCalibration() {
 }
 
 function calibrate() {
+  if (!state.sensorListenerAttached) {
+    setNotice('Tap Start Measuring before zeroing this mode.', 'warn');
+    refreshUI();
+    return;
+  }
   const raw = rawAngleForMode();
   state.calibrationOffsets[state.mode] = raw;
   state.calibrationMeta[state.mode] = {
@@ -921,17 +949,16 @@ function resetCalibration() {
 }
 
 function toggleLock() {
-  state.locked = !state.locked;
-  if (!state.locked) {
-    resetLiveAveraging();
+  if (state.sensorListenerAttached) {
+    pauseSensors();
+    setNotice('Measurement paused. Sensor telemetry is stopped until you tap Start Measuring.', 'good');
+    refreshUI();
+    return;
   }
-  const noticeText = state.locked ? 'Reading locked. Save the average or tap Resume Live.' : 'Live reading resumed.';
-  const noticeTone = state.locked ? 'good' : 'warn';
-  setNotice(noticeText, noticeTone);
-  // Lock affects the save/lock controls and the guide step (warning row and instructions).
-  refreshGuide();
-  refreshReadiness();
-  refreshLockButton();
+  requestSensors(ok => {
+    setNotice(ok ? 'Measurement started. Hold steady until the reading settles.' : 'Sensor access is blocked. Check Safari motion permission settings.', ok ? 'good' : 'warn');
+    refreshUI();
+  });
 }
 
 function guideStepNumber(title) {
@@ -945,6 +972,9 @@ function guideActionState() {
   const baseline = precision.baseline;
   if (!state.sensorsAvailable) {
     return { label: 'Retry sensor access', action: 'retrySensors', reason: 'Motion permission is required before measuring.' };
+  }
+  if (!state.sensorListenerAttached) {
+    return { label: 'Start Measuring', action: 'startMeasuring', reason: 'Sensor telemetry is paused until you start a measurement.' };
   }
   if (state.workflow === 'precision' && !state.deviceProfile) {
     return {
@@ -996,6 +1026,7 @@ function performGuideAction() {
   const { action } = guideActionState();
   const handlers = {
     retrySensors: () => retrySensors(),
+    startMeasuring: () => toggleLock(),
     captureDeviceCalibration: () => captureDeviceCalibration(),
     createOrUpdateFixture: () => createOrUpdateFixture(),
     setModeLevel: () => setMode('level'),
@@ -1023,6 +1054,11 @@ function precisionSaveReason(summary = precisionSummary(state.mode, state.select
 }
 
 function captureBaselinePoint(side) {
+  if (!state.sensorListenerAttached) {
+    setNotice('Tap Start Measuring before capturing a baseline point.', 'warn');
+    refreshUI();
+    return;
+  }
   if (state.workflow !== 'precision') {
     setNotice('Switch to Precision workflow to capture a baseline plane.', 'warn');
     refreshUI();
@@ -1046,6 +1082,11 @@ function captureBaselinePoint(side) {
 }
 
 function capturePrecisionReading(direction) {
+  if (!state.sensorListenerAttached) {
+    setNotice('Tap Start Measuring before capturing precision readings.', 'warn');
+    refreshUI();
+    return;
+  }
   if (state.workflow !== 'precision') {
     setNotice('Switch to Precision workflow to build a repeated capture set.', 'warn');
     refreshUI();
@@ -1109,8 +1150,9 @@ function saveQuickMeasurement() {
   state.measurements = state.measurements.filter(item => !(item.mode === measurement.mode && item.side === measurement.side));
   state.measurements.push(measurement);
   saveState();
+  pauseSensors();
   setSaveConfirmation(`Saved ${MODE_LABELS[state.mode]} · ${state.selectedSide} at ${formatSigned(measurement.value)} with ${measurement.confidence}% confidence.`);
-  setNotice(`Saved averaged ${state.mode} reading for ${state.selectedSide}.`, 'good');
+  setNotice(`Saved averaged ${state.mode} reading for ${state.selectedSide}. Measurement paused.`, 'good');
   refreshUI();
 }
 
@@ -1145,8 +1187,9 @@ function savePrecisionMeasurement() {
   state.measurements = state.measurements.filter(item => !(item.mode === measurement.mode && item.side === measurement.side));
   state.measurements.push(measurement);
   saveState();
+  pauseSensors();
   setSaveConfirmation(`Saved precision ${MODE_LABELS[state.mode]} · ${state.selectedSide} at ${formatSigned(measurement.value)} • ${measurement.trustVerdict}.`);
-  setNotice(`Saved precision ${state.mode} reading for ${state.selectedSide}.`, 'good');
+  setNotice(`Saved precision ${state.mode} reading for ${state.selectedSide}. Measurement paused.`, 'good');
   refreshUI();
 }
 
@@ -1201,6 +1244,7 @@ function refreshGuide() {
     precision,
     modeLabel: MODE_LABELS[state.mode],
     guide,
+    telemetryActive: state.sensorListenerAttached,
   });
 
   el('workflow-step-title').textContent = title;
@@ -1233,14 +1277,16 @@ function refreshReadiness() {
   const saveReady = state.workflow === 'precision'
     ? summary.readyToSave && Number.isFinite(summary.finalValue)
     : state.settled;
-  const liveState = state.locked ? 'Locked' : (!state.sampleBuffer.length ? 'Waiting' : (state.settled ? 'Settled' : 'Settling'));
   const saveReason = state.workflow === 'precision'
     ? precisionSaveReason(summary)
     : (state.settled ? 'Settled average is ready.' : `${state.sampleBuffer.length}/${SAMPLE_WINDOW} samples • hold steady.`);
+  const liveState = !state.sensorListenerAttached
+    ? 'Paused'
+    : (!state.sampleBuffer.length ? 'Waiting' : (state.settled ? 'Settled' : 'Settling'));
 
   el('readiness-live').textContent = liveState;
-  el('readiness-live-sub').textContent = state.locked
-    ? 'Resume for live updates'
+  el('readiness-live-sub').textContent = !state.sensorListenerAttached
+    ? 'Tap Start Measuring'
     : `${state.sampleBuffer.length}/${SAMPLE_WINDOW} samples`;
   el('readiness-save').textContent = saveReady ? 'Ready' : 'Blocked';
   el('readiness-save-sub').textContent = saveReason;
@@ -1252,16 +1298,22 @@ function refreshStatus() {
   const range = sampleRange();
   const stdDev = sampleStdDev();
   const calMeta = state.calibrationMeta[state.mode];
-  const stabilityValue = !state.sampleBuffer.length ? 'Waiting' : (state.settled ? 'Settled' : 'Stabilizing');
-  const stabilitySub = !state.sampleBuffer.length
-    ? 'Need motion samples'
-    : `${state.sampleBuffer.length}/${SAMPLE_WINDOW} samples • spread ${formatNumber(range)}°`;
+  const stabilityValue = !state.sensorListenerAttached
+    ? 'Paused'
+    : (!state.sampleBuffer.length ? 'Waiting' : (state.settled ? 'Settled' : 'Stabilizing'));
+  const stabilitySub = !state.sensorListenerAttached
+    ? 'Telemetry stopped'
+    : (!state.sampleBuffer.length
+        ? 'Need motion samples'
+        : `${state.sampleBuffer.length}/${SAMPLE_WINDOW} samples • spread ${formatNumber(range)}°`);
   const orientationText = `${orientationLabel(state.screenOrientation)} ${state.orientationOk ? '✓' : '✕'}`;
 
   el('chip-stability').textContent = stabilityValue;
   el('chip-stability-sub').textContent = stabilitySub;
   el('chip-confidence').textContent = `${state.confidence}%`;
-  el('chip-confidence-sub').textContent = `σ ${formatNumber(stdDev)}° • averaged live feed`;
+  el('chip-confidence-sub').textContent = state.sensorListenerAttached
+    ? `σ ${formatNumber(stdDev)}° • averaged live feed`
+    : 'Start Measuring to refresh confidence';
   el('chip-orientation').textContent = orientationText;
   el('chip-orientation-sub').textContent = `Preferred for ${state.mode}: ${MODE_GUIDES[state.mode].orientation}`;
   el('chip-calibration').textContent = calMeta ? formatSigned(calMeta.offset) : 'Not set';
@@ -1284,7 +1336,9 @@ function refreshGauge() {
   drawBubble(avg);
   el('gauge-mode-label').textContent = MODE_LABELS[state.mode];
   el('avg-display').textContent = `Avg ${formatSigned(avg)} from ${state.sampleBuffer.length} sample${state.sampleBuffer.length === 1 ? '' : 's'}`;
-  el('confidence-label').textContent = state.settled ? `Confidence ${state.confidence}% • Settled` : `Confidence ${state.confidence}% • Live`;
+  el('confidence-label').textContent = !state.sensorListenerAttached
+    ? `Confidence ${state.confidence}% • Paused`
+    : (state.settled ? `Confidence ${state.confidence}% • Settled` : `Confidence ${state.confidence}% • Live`);
 }
 
 function refreshCalibrationCard() {
@@ -1333,10 +1387,12 @@ function refreshPrecisionCard() {
   el('precision-summary-trust').textContent = `${summary.repeatabilityScore}% trust`;
 
   const deviceCapture = el('btn-capture-device');
-  deviceCapture.disabled = !state.settled;
-  deviceCapture.title = state.settled
+  deviceCapture.disabled = !state.sensorListenerAttached || !state.settled;
+  deviceCapture.title = !state.sensorListenerAttached
+    ? 'Tap Start Measuring before capturing device bias.'
+    : (state.settled
     ? 'Capture the current settled sensor bias as the device reference.'
-    : 'Hold the phone steady until stability turns to Settled before capturing device bias.';
+    : 'Hold the phone steady until stability turns to Settled before capturing device bias.');
 
   const fixtureSelect = el('fixture-select');
   const currentValue = state.precisionSession.fixtureId || '';
@@ -1366,9 +1422,11 @@ function refreshPrecisionCard() {
     sub.textContent = !stats
       ? '0 captures'
       : `${stats.count} cap • σ ${formatNumber(stats.stdDev)}°`;
-    btn.disabled = state.workflow !== 'precision' || state.mode !== 'level' || !state.settled;
+    btn.disabled = state.workflow !== 'precision' || state.mode !== 'level' || !state.sensorListenerAttached || !state.settled;
     btn.title = state.mode === 'level'
-      ? (state.settled ? `Capture baseline point for ${side}.` : 'Hold steady in Level mode before capturing.')
+      ? (!state.sensorListenerAttached
+          ? 'Tap Start Measuring before capturing baseline points.'
+          : (state.settled ? `Capture baseline point for ${side}.` : 'Hold steady in Level mode before capturing.'))
       : 'Switch to Level mode to capture baseline points.';
   });
 
@@ -1398,12 +1456,14 @@ function refreshPrecisionCard() {
   el('precision-final-sub').textContent = `${summary.verdict}${Number.isFinite(summary.reversalCorrectedValue) ? ` • corrected ${formatSigned(summary.reversalCorrectedValue)}` : ''}`;
   const captureBlockedReason = !fixture
     ? 'Select or save a fixture profile before capturing.'
-    : (!state.settled
+    : (!state.sensorListenerAttached
+        ? 'Tap Start Measuring before capturing precision readings.'
+        : (!state.settled
         ? 'Hold steady until stability turns to Settled before capturing.'
         : (state.mode !== 'level' && !baseline.complete
             ? 'Capture all four Level baseline points before wheel captures.'
-            : 'Capture a settled reading for the selected side.'));
-  const captureBlocked = !fixture || !state.settled || (state.mode !== 'level' && !baseline.complete);
+            : 'Capture a settled reading for the selected side.')));
+  const captureBlocked = !fixture || !state.sensorListenerAttached || !state.settled || (state.mode !== 'level' && !baseline.complete);
   el('btn-capture-forward').disabled = captureBlocked;
   el('btn-capture-reverse').disabled = captureBlocked;
   el('btn-capture-forward').title = captureBlockedReason;
@@ -1415,9 +1475,9 @@ function refreshPrecisionCard() {
 
 function refreshLockButton() {
   const btn = el('btn-lock');
-  btn.textContent = state.locked ? 'Resume Live' : 'Lock';
-  btn.className = `btn btn-small ${state.locked ? 'btn-warning' : 'btn-surface'}`;
-  btn.title = state.locked ? 'Resume live reading' : 'Lock reading';
+  btn.textContent = state.sensorListenerAttached ? 'Pause' : 'Start Measuring';
+  btn.className = `btn btn-small ${state.sensorListenerAttached ? 'btn-warning' : 'btn-surface'}`;
+  btn.title = state.sensorListenerAttached ? 'Stop sensor telemetry' : 'Start sensor telemetry for a measurement';
   const saveBtn = el('btn-save');
   saveBtn.textContent = state.workflow === 'precision' ? 'Save Precision' : 'Save Avg';
   if (state.workflow === 'precision') {
@@ -1435,6 +1495,52 @@ function refreshSaveConfirmation() {
   const confirmation = el('save-confirmation');
   confirmation.textContent = state.lastSaveConfirmation || '';
   confirmation.classList.toggle('hidden-panel', !state.lastSaveConfirmation);
+}
+
+function refreshWorkflowResults() {
+  const readings = SIDES.map(side => measurementFor(state.mode, side));
+  const savedCount = readings.filter(Boolean).length;
+  const modeLabel = MODE_LABELS[state.mode];
+  const complete = savedCount === SIDES.length;
+  const baseline = baselineSummary();
+  const grid = el('workflow-spec-grid');
+
+  el('workflow-result-title').textContent = complete
+    ? `Final ${modeLabel} specs ready`
+    : `${modeLabel} workflow`;
+  el('workflow-result-summary').textContent = complete
+    ? 'All four corners are saved. Review calculated side values and deltas before adjusting.'
+    : `Saved ${savedCount}/4 corners. Follow the next workflow action and collect stable data before saving.`;
+
+  grid.textContent = '';
+  SIDES.forEach((side, index) => {
+    const reading = readings[index];
+    const item = buildElement('div', `spec-item${reading ? ' ready' : ''}`);
+    item.appendChild(buildElement('span', 'spec-label', side));
+    item.appendChild(buildElement('strong', 'spec-value', reading ? formatSigned(reading.value) : 'Pending'));
+    item.appendChild(buildElement('small', 'spec-note', reading
+      ? `${reading.workflow === 'precision' ? (reading.trustVerdict || 'Precision saved') : `${reading.confidence}% confidence`}`
+      : 'Collect when guided'));
+    grid.appendChild(item);
+  });
+
+  const frontDelta = deltaFor(state.mode, 'FL', 'FR');
+  const rearDelta = deltaFor(state.mode, 'RL', 'RR');
+  [
+    ['Front Δ', frontDelta === null ? 'Pending' : formatSigned(frontDelta), frontDelta === null ? 'Needs FL + FR' : 'FL − FR'],
+    ['Rear Δ', rearDelta === null ? 'Pending' : formatSigned(rearDelta), rearDelta === null ? 'Needs RL + RR' : 'RL − RR'],
+    ['Baseline', baseline.complete ? baseline.label : `${baseline.completedSides}/4`, state.workflow === 'precision' ? 'Level plane quality' : 'Use Level first'],
+  ].forEach(([label, value, note]) => {
+    const item = buildElement('div', `spec-item${value !== 'Pending' ? ' ready' : ''}`);
+    item.appendChild(buildElement('span', 'spec-label', label));
+    item.appendChild(buildElement('strong', 'spec-value', value));
+    item.appendChild(buildElement('small', 'spec-note', note));
+    grid.appendChild(item);
+  });
+}
+
+function refreshTelemetryVisibility() {
+  document.querySelector('details.advanced-card')?.classList.toggle('hidden-panel', !state.sensorListenerAttached);
 }
 
 function refreshSavedReadings() {
@@ -1533,6 +1639,8 @@ function refreshUI() {
   refreshLockButton();
   refreshSavedReadings();
   refreshAdvanced();
+  refreshWorkflowResults();
+  refreshTelemetryVisibility();
   refreshSaveConfirmation();
   refreshAriaState();
 }

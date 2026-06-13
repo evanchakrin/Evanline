@@ -167,6 +167,7 @@ export function computeGuideState({
   precision,
   modeLabel,
   guide,
+  telemetryActive = true,
 }) {
   if (!sensorsAvailable) {
     return {
@@ -182,6 +183,16 @@ export function computeGuideState({
       description: 'Use Level mode before alignment readings so your baseline is trustworthy.',
       warning: notice.text,
       tone: notice.tone,
+    };
+  }
+  if (!telemetryActive) {
+    return {
+      title: mode === 'level' ? '1. Start Level measurement' : `Start ${modeLabel}`,
+      description: mode === 'level'
+        ? 'Begin with Level so the workflow can verify the surface and build a trustworthy baseline.'
+        : `Start Measuring only when the phone is placed for ${modeLabel}. The app will collect quality data, then pause after save.`,
+      warning: 'Sensor telemetry is paused until you start the next measurement step.',
+      tone: 'warn',
     };
   }
   if (workflow === 'precision' && !deviceProfileSet) {

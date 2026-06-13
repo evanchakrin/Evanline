@@ -12,10 +12,15 @@
       --text: #e6edf3;
       --muted: #8b949e;
       --radius: 16px;
+      --screen-height: 100vh;
+    }
+    @supports (height: 100dvh) {
+      :root { --screen-height: 100dvh; }
     }
 
     html, body {
       height: 100%;
+      min-height: 100dvh;
       background: var(--bg);
       color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
@@ -27,11 +32,12 @@
     .screen {
       position: fixed;
       inset: 0;
+      height: var(--screen-height);
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      padding: env(safe-area-inset-top, 20px) 24px env(safe-area-inset-bottom, 20px);
+      padding: max(16px, env(safe-area-inset-top)) 24px max(16px, env(safe-area-inset-bottom));
       transition: opacity 0.35s ease, transform 0.35s ease;
     }
     .screen.hidden {
@@ -44,6 +50,8 @@
     #screen-welcome {
       gap: 16px;
       background: var(--bg);
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
     }
     .logo-wrap {
       display: flex;
@@ -178,7 +186,9 @@
     #screen-main,
     #screen-instructions {
       justify-content: flex-start;
-      padding-top: max(env(safe-area-inset-top, 20px), 50px);
+      /* Dynamic viewport height handles browser bars, so only safe breathing room is needed here. */
+      padding-top: max(24px, env(safe-area-inset-top));
+      padding-bottom: max(24px, env(safe-area-inset-bottom));
       gap: 0;
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
@@ -572,6 +582,59 @@
       flex-direction: column;
       gap: 4px;
     }
+    .workflow-results {
+      align-items: stretch;
+    }
+    .workflow-result-hero {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 12px;
+      border-radius: 12px;
+      background: rgba(88, 166, 255, 0.08);
+      border: 1px solid rgba(88, 166, 255, 0.25);
+    }
+    .workflow-result-hero strong {
+      font-size: 18px;
+    }
+    .workflow-result-hero span {
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+    .spec-grid {
+      width: 100%;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .spec-item {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .spec-item.ready {
+      border-color: rgba(63, 185, 80, 0.35);
+    }
+    .spec-label,
+    .spec-note {
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+    .spec-label {
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      font-weight: 700;
+    }
+    .spec-value {
+      font-size: 18px;
+      font-variant-numeric: tabular-nums;
+    }
 
     details.advanced-card {
       align-items: stretch;
@@ -862,6 +925,40 @@
       font-family: inherit;
       resize: vertical;
     }
+
+    /* iPhone 14 Pro is 393px wide; 760px catches its shortened Safari/Chrome viewport with browser bars visible. */
+    @media (max-width: 430px) and (max-height: 760px) {
+      .screen {
+        padding-left: 20px;
+        padding-right: 20px;
+      }
+      #screen-welcome {
+        justify-content: flex-start;
+        gap: 12px;
+      }
+      .logo-wrap { gap: 10px; }
+      .logo-icon { width: 76px; height: 76px; }
+      .logo-title { font-size: 30px; }
+      .welcome-desc {
+        font-size: 14px;
+        line-height: 1.45;
+      }
+      .welcome-steps { gap: 6px; }
+      .welcome-steps span {
+        padding: 9px 10px;
+        font-size: 12px;
+      }
+      .home-url-card {
+        gap: 10px;
+        padding: 10px;
+      }
+      .home-qr {
+        width: 78px;
+        height: 78px;
+      }
+      .btn { padding-top: 12px; padding-bottom: 12px; }
+      .btn-ghost { padding-top: 8px; padding-bottom: 8px; }
+    }
     .fixture-checkbox {
       flex-direction: row;
       align-items: center;
@@ -880,6 +977,7 @@
       .comparison-grid,
       .advanced-grid,
       .mode-cal-list,
+      .spec-grid,
       .precision-grid,
       .precision-summary,
       .readiness-strip,
