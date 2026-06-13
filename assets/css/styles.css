@@ -28,6 +28,7 @@
     .screen {
       position: fixed;
       inset: 0;
+      /* 100vh is the fallback; 100dvh keeps content inside mobile browser bars. */
       height: 100vh;
       height: 100dvh;
       display: flex;
@@ -183,6 +184,7 @@
     #screen-main,
     #screen-instructions {
       justify-content: flex-start;
+      /* Dynamic viewport height handles browser bars, so only safe breathing room is needed here. */
       padding-top: max(24px, env(safe-area-inset-top));
       padding-bottom: max(24px, env(safe-area-inset-bottom));
       gap: 0;
