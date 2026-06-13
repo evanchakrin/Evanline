@@ -17,7 +17,7 @@ import {
 
 // v3 adds workflow/session objects beyond the older v2 zero + readings payload, so loadState() migrates legacy data forward on first read.
 const STORAGE_KEY = 'evanline-state-v3';
-const MODES = ['camber', 'toe', 'level', 'pitch'];
+const MODES = ['level', 'camber', 'toe', 'pitch'];
 const SIDES = ['FL', 'FR', 'RL', 'RR'];
 const MAX_STORED_MEASUREMENTS = 32;
 const MAX_FIXTURE_PROFILES = 12;
@@ -76,7 +76,7 @@ const PRECISION_CAPTURE_TARGET = 3;
 const BASELINE_CAPTURE_TARGET = 2;
 
 const state = {
-  mode: 'camber',
+  mode: 'level',
   workflow: 'quick',
   alpha: 0,
   beta: 0,
@@ -303,14 +303,14 @@ function updateNeedle(angleDeg) {
 }
 
 function directionLabel(angleDeg) {
+  if (state.mode === 'level') {
+    return angleDeg > DIRECTION_DEADBAND_DEG ? '↗ Tilts Right' : angleDeg < -DIRECTION_DEADBAND_DEG ? '↖ Tilts Left' : '— Level';
+  }
   if (state.mode === 'camber') {
     return angleDeg > DIRECTION_DEADBAND_DEG ? '▲ Positive Camber' : angleDeg < -DIRECTION_DEADBAND_DEG ? '▼ Negative Camber' : '— Zero Camber';
   }
   if (state.mode === 'toe') {
     return angleDeg > DIRECTION_DEADBAND_DEG ? '→ Toe Out' : angleDeg < -DIRECTION_DEADBAND_DEG ? '← Toe In' : '— Neutral';
-  }
-  if (state.mode === 'level') {
-    return angleDeg > DIRECTION_DEADBAND_DEG ? '↗ Tilts Right' : angleDeg < -DIRECTION_DEADBAND_DEG ? '↖ Tilts Left' : '— Level';
   }
   return angleDeg > DIRECTION_DEADBAND_DEG ? '↑ Nose Up' : angleDeg < -DIRECTION_DEADBAND_DEG ? '↓ Nose Down' : '— Flat';
 }
@@ -1242,6 +1242,7 @@ function refreshGuide() {
     precision,
     modeLabel: MODE_LABELS[state.mode],
     guide,
+    telemetryActive: state.sensorListenerAttached,
   });
 
   el('workflow-step-title').textContent = title;
@@ -1494,6 +1495,52 @@ function refreshSaveConfirmation() {
   confirmation.classList.toggle('hidden-panel', !state.lastSaveConfirmation);
 }
 
+function refreshWorkflowResults() {
+  const readings = SIDES.map(side => measurementFor(state.mode, side));
+  const savedCount = readings.filter(Boolean).length;
+  const modeLabel = MODE_LABELS[state.mode];
+  const complete = savedCount === SIDES.length;
+  const baseline = baselineSummary();
+  const grid = el('workflow-spec-grid');
+
+  el('workflow-result-title').textContent = complete
+    ? `Final ${modeLabel} specs ready`
+    : `${modeLabel} workflow`;
+  el('workflow-result-summary').textContent = complete
+    ? 'All four corners are saved. Review calculated side values and deltas before adjusting.'
+    : `Saved ${savedCount}/4 corners. Follow the next workflow action and collect stable data before saving.`;
+
+  grid.textContent = '';
+  SIDES.forEach((side, index) => {
+    const reading = readings[index];
+    const item = buildElement('div', `spec-item${reading ? ' ready' : ''}`);
+    item.appendChild(buildElement('span', 'spec-label', side));
+    item.appendChild(buildElement('strong', 'spec-value', reading ? formatSigned(reading.value) : 'Pending'));
+    item.appendChild(buildElement('small', 'spec-note', reading
+      ? `${reading.workflow === 'precision' ? (reading.trustVerdict || 'Precision saved') : `${reading.confidence}% confidence`}`
+      : 'Collect when guided'));
+    grid.appendChild(item);
+  });
+
+  const frontDelta = deltaFor(state.mode, 'FL', 'FR');
+  const rearDelta = deltaFor(state.mode, 'RL', 'RR');
+  [
+    ['Front Δ', frontDelta === null ? 'Pending' : formatSigned(frontDelta), frontDelta === null ? 'Needs FL + FR' : 'FL − FR'],
+    ['Rear Δ', rearDelta === null ? 'Pending' : formatSigned(rearDelta), rearDelta === null ? 'Needs RL + RR' : 'RL − RR'],
+    ['Baseline', baseline.complete ? baseline.label : `${baseline.completedSides}/4`, state.workflow === 'precision' ? 'Level plane quality' : 'Use Level first'],
+  ].forEach(([label, value, note]) => {
+    const item = buildElement('div', `spec-item${value !== 'Pending' ? ' ready' : ''}`);
+    item.appendChild(buildElement('span', 'spec-label', label));
+    item.appendChild(buildElement('strong', 'spec-value', value));
+    item.appendChild(buildElement('small', 'spec-note', note));
+    grid.appendChild(item);
+  });
+}
+
+function refreshTelemetryVisibility() {
+  document.querySelector('details.advanced-card')?.classList.toggle('hidden-panel', !state.sensorListenerAttached);
+}
+
 function refreshSavedReadings() {
   document.querySelectorAll('.side-btn').forEach(button => {
     button.classList.toggle('active', button.dataset.side === state.selectedSide);
@@ -1590,6 +1637,8 @@ function refreshUI() {
   refreshLockButton();
   refreshSavedReadings();
   refreshAdvanced();
+  refreshWorkflowResults();
+  refreshTelemetryVisibility();
   refreshSaveConfirmation();
   refreshAriaState();
 }

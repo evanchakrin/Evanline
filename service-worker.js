@@ -1,10 +1,10 @@
-const CACHE_NAME = 'evanline-v7';
+const CACHE_NAME = 'evanline-v8';
 const ASSETS = [
   './',
   './index.html',
   './manifest.json',
-  './assets/css/styles.css?v=7',
-  './assets/js/app.js?v=7',
+  './assets/css/styles.css?v=8',
+  './assets/js/app.js?v=8',
   './assets/js/domain.js',
   './assets/js/precision.js',
   './icon-192.png',

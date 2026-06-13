@@ -9,7 +9,7 @@
   <meta name="theme-color" content="#0d1117" />
   <link rel="manifest" href="manifest.json" />
   <title>Evanline – Wheel Alignment</title>
-    <link rel="stylesheet" href="assets/css/styles.css?v=7" />
+    <link rel="stylesheet" href="assets/css/styles.css?v=8" />
 
 </head>
 <body>
@@ -89,9 +89,9 @@
   </div>
 
   <div class="mode-tabs" role="tablist" aria-label="Measurement mode selection">
-    <button class="mode-tab active" data-mode="camber" data-action="setMode" data-arg="camber" role="tab" aria-selected="true">Camber</button>
+    <button class="mode-tab active" data-mode="level" data-action="setMode" data-arg="level" role="tab" aria-selected="true">Level</button>
+    <button class="mode-tab" data-mode="camber" data-action="setMode" data-arg="camber" role="tab" aria-selected="false">Camber</button>
     <button class="mode-tab" data-mode="toe" data-action="setMode" data-arg="toe" role="tab" aria-selected="false">Toe</button>
-    <button class="mode-tab" data-mode="level" data-action="setMode" data-arg="level" role="tab" aria-selected="false">Level</button>
     <button class="mode-tab" data-mode="pitch" data-action="setMode" data-arg="pitch" role="tab" aria-selected="false">Pitch</button>
   </div>
 
@@ -333,6 +333,15 @@
   <div class="control-hint" id="quick-control-hint">Save unlocks when the reading is settled.</div>
   <div class="save-confirmation hidden-panel" id="save-confirmation" role="status" aria-live="polite"></div>
 
+  <div class="gauge-card workflow-results" id="workflow-results-card">
+    <span class="gauge-label">Workflow results</span>
+    <div class="workflow-result-hero">
+      <strong id="workflow-result-title">Start with Level</strong>
+      <span id="workflow-result-summary">Follow the guide to collect stable data, then final specs appear here.</span>
+    </div>
+    <div class="spec-grid" id="workflow-spec-grid" aria-label="Calculated final specs"></div>
+  </div>
+
   <div class="cal-card" id="cal-card">
     <div class="cal-info">
       <span class="cal-title">Calibration Offset</span>
@@ -494,7 +503,7 @@
   <div class="instr-spacer"></div>
 </div>
 
-<script type="module" src="assets/js/app.js?v=7"></script>
+<script type="module" src="assets/js/app.js?v=8"></script>
 
 <dialog id="fixture-dialog" class="fixture-dialog" aria-labelledby="fixture-dialog-title">
   <form method="dialog" id="fixture-form" class="fixture-form">

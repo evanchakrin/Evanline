@@ -582,6 +582,59 @@
       flex-direction: column;
       gap: 4px;
     }
+    .workflow-results {
+      align-items: stretch;
+    }
+    .workflow-result-hero {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 12px;
+      border-radius: 12px;
+      background: rgba(88, 166, 255, 0.08);
+      border: 1px solid rgba(88, 166, 255, 0.25);
+    }
+    .workflow-result-hero strong {
+      font-size: 18px;
+    }
+    .workflow-result-hero span {
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+    .spec-grid {
+      width: 100%;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .spec-item {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .spec-item.ready {
+      border-color: rgba(63, 185, 80, 0.35);
+    }
+    .spec-label,
+    .spec-note {
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+    .spec-label {
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      font-weight: 700;
+    }
+    .spec-value {
+      font-size: 18px;
+      font-variant-numeric: tabular-nums;
+    }
 
     details.advanced-card {
       align-items: stretch;
@@ -924,6 +977,7 @@
       .comparison-grid,
       .advanced-grid,
       .mode-cal-list,
+      .spec-grid,
       .precision-grid,
       .precision-summary,
       .readiness-strip,
