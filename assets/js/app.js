@@ -735,7 +735,7 @@ function setWorkflow(workflow) {
 
 function selectSide(side) {
   state.selectedSide = side;
-  // Side selection only affects the guide step, precision panel, and saved-readings list.
+  // Side selection affects the guide step, precision panel, lock button label, and saved-readings list.
   refreshGuide();
   refreshPrecisionCard();
   refreshLockButton();
@@ -883,7 +883,7 @@ function toggleLock() {
   const noticeText = state.locked ? 'Reading locked. Save the average or tap Resume Live.' : 'Live reading resumed.';
   const noticeTone = state.locked ? 'good' : 'warn';
   setNotice(noticeText, noticeTone);
-  // Lock only affects the save/lock controls and the guide warning row.
+  // Lock affects the save/lock controls and the guide step (warning row and instructions).
   refreshGuide();
   refreshLockButton();
 }
