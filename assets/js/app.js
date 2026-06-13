@@ -303,6 +303,7 @@ function updateNeedle(angleDeg) {
 }
 
 function directionLabel(angleDeg) {
+  // Keep branches aligned with MODES order so tab/default workflow ordering stays easy to scan.
   if (state.mode === 'level') {
     return angleDeg > DIRECTION_DEADBAND_DEG ? '↗ Tilts Right' : angleDeg < -DIRECTION_DEADBAND_DEG ? '↖ Tilts Left' : '— Level';
   }
@@ -779,6 +780,7 @@ function retrySensors() {
 function showInstructions() {
   state.prevScreen = document.querySelector('.screen:not(.hidden)')?.id || 'screen-welcome';
   if (state.sensorListenerAttached) {
+    // Instructions are a non-measurement screen; users restart telemetry explicitly with Start Measuring.
     pauseSensors();
   }
   showScreen('screen-instructions');
