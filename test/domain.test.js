@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   average,
+  bufferDrift,
   buildArcPath,
   camberDeg,
   captureSeriesStats,
@@ -12,10 +13,37 @@ import {
   gravityFromEuler,
   inclinationForMode,
   levelDeg,
+  motionIsQuasiStatic,
   pitchDeg,
   polarPoint,
   standardDeviation,
+  toleranceHalfWidth,
 } from '../assets/js/domain.js';
+
+// Shared baseline inputs for computeSampleQuality so each test overrides just the field
+// under test. A 6-sample tight buffer at now=2000 with settledStart=1000 settles by default.
+function sampleQualityInputs(overrides = {}) {
+  return {
+    sampleBuffer: [0.02, 0.03, 0.01, 0.02, 0.02, 0.03, 0.01],
+    orientationOk: true,
+    calibrationSet: true,
+    now: 2_000,
+    settledStart: 1_000,
+    alignedStart: 1_200,
+    alignedThreshold: 0.3,
+    minSampleCount: 6,
+    settledRange: 0.18,
+    settledStdDev: 0.08,
+    settledHoldMs: 900,
+    alignedHoldMs: 500,
+    maxConfidenceBase: 98,
+    rangePenalty: 260,
+    stdDevPenalty: 420,
+    orientationPenalty: 30,
+    calibrationPenalty: 12,
+    ...overrides,
+  };
+}
 
 test('clamp bounds values', () => {
   assert.equal(clamp(5, 0, 4), 4);
@@ -200,4 +228,72 @@ test('inclinationForMode dispatches per mode and defaults to camber', () => {
   // Missing/non-finite gravity yields null regardless of mode.
   assert.equal(inclinationForMode('level', null), null);
   assert.equal(inclinationForMode('camber', { x: 0, y: NaN, z: 0 }), null);
+});
+
+test('bufferDrift measures half-to-half trend and ignores short buffers', () => {
+  // Too few samples to split into two meaningful halves: no trend to report.
+  assert.equal(bufferDrift([]), 0);
+  assert.equal(bufferDrift([1, 2, 3]), 0);
+  // Flat buffer: zero drift.
+  assert.equal(bufferDrift([0.02, 0.02, 0.02, 0.02]), 0);
+  // A clean ramp 0..7 splits into mean(0..3)=1.5 vs mean(4..7)=5.5 => drift 4.
+  assert.equal(bufferDrift([0, 1, 2, 3, 4, 5, 6, 7]), 4);
+});
+
+test('toleranceHalfWidth returns k*sigma/sqrt(N) and discounts smoothed N', () => {
+  // Raw buffer (rho ~= 0): N_eff = N, so half-width = 2 * 0.1 / sqrt(4) = 0.1.
+  assert.equal(toleranceHalfWidth({ stdDev: 0.1, sampleCount: 4 }), 0.1);
+  // Too little data to estimate a band.
+  assert.equal(toleranceHalfWidth({ stdDev: 0.1, sampleCount: 1 }), null);
+  assert.equal(toleranceHalfWidth({ stdDev: NaN, sampleCount: 4 }), null);
+  // Smoothing inflates the band because autocorrelation lowers N_eff below N.
+  const raw = toleranceHalfWidth({ stdDev: 0.1, sampleCount: 8 });
+  const smoothed = toleranceHalfWidth({ stdDev: 0.1, sampleCount: 8, smoothingAlpha: 0.22 });
+  assert.ok(smoothed > raw);
+});
+
+test('motionIsQuasiStatic gates on magnitude ratio and rotation, allowing unknown', () => {
+  // No magnitude yet: do not block the Euler-only fallback.
+  assert.equal(motionIsQuasiStatic({ gravityMagnitude: null }), true);
+  // Resting at ~9.81 m/s^2 passes.
+  assert.equal(motionIsQuasiStatic({ gravityMagnitude: 9.81 }), true);
+  // Normalized ~1g also passes against the same expected via the ratio.
+  assert.equal(motionIsQuasiStatic({ gravityMagnitude: 1, expectedMagnitude: 1 }), true);
+  // A press/shove pushes |g| well off 1g and fails.
+  assert.equal(motionIsQuasiStatic({ gravityMagnitude: 12 }), false);
+  // Magnitude fine but high spin (deg/s) fails.
+  assert.equal(motionIsQuasiStatic({ gravityMagnitude: 9.81, rotationRate: { alpha: 20, beta: 0, gamma: 0 } }), false);
+  // Low spin passes.
+  assert.equal(motionIsQuasiStatic({ gravityMagnitude: 9.81, rotationRate: { alpha: 1, beta: 1, gamma: 1 } }), true);
+});
+
+test('computeSampleQuality drift gate blocks settle on a slow ramp', () => {
+  // Small instantaneous range/stdDev but a steady upward trend across the window.
+  const ramp = [0.00, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07];
+  const result = computeSampleQuality(sampleQualityInputs({
+    sampleBuffer: ramp,
+    settledRange: 0.2,
+    settledStdDev: 0.1,
+    driftTol: 0.03,
+  }));
+  assert.equal(result.settled, false);
+  assert.ok(result.drift > 0.03);
+  // Reports a +/- band off the raw buffer.
+  assert.ok(Number.isFinite(result.toleranceDeg));
+});
+
+test('computeSampleQuality blocks settle when reading/motion/stream gates fail', () => {
+  // Baseline: this buffer settles when every gate passes.
+  assert.equal(computeSampleQuality(sampleQualityInputs()).settled, true);
+  // P0-5: no real reading.
+  assert.equal(computeSampleQuality(sampleQualityInputs({ readingOk: false })).settled, false);
+  // P0-6: device is being moved/pressed.
+  assert.equal(computeSampleQuality(sampleQualityInputs({ motionOk: false })).settled, false);
+  // P1-6: sensor stream went stale.
+  assert.equal(computeSampleQuality(sampleQualityInputs({ streamOk: false })).settled, false);
+  // The gate flags are echoed back for the UI.
+  const blocked = computeSampleQuality(sampleQualityInputs({ readingOk: false, motionOk: false, streamOk: false }));
+  assert.equal(blocked.readingOk, false);
+  assert.equal(blocked.motionOk, false);
+  assert.equal(blocked.streamOk, false);
 });

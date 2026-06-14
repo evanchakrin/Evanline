@@ -93,6 +93,30 @@ export function captureSeriesStats(series = []) {
   };
 }
 
+// Drift magnitude: |mean(second half) - mean(first half)| of a sample buffer. A slow
+// ramp can have a small instantaneous range/stdDev yet still be trending, which this
+// catches. Buffers with fewer than two samples per half report 0 (no trend to measure).
+export function bufferDrift(sampleBuffer = []) {
+  const n = sampleBuffer.length;
+  if (n < 4) return 0;
+  const half = Math.floor(n / 2);
+  const firstHalf = sampleBuffer.slice(0, half);
+  const secondHalf = sampleBuffer.slice(n - half);
+  return Math.abs(average(secondHalf) - average(firstHalf));
+}
+
+// 95% half-width of the mean (the +/- band reported in degrees). k*sigma/sqrt(N_eff),
+// k ~= 2 for a ~95% interval. N_eff accounts for autocorrelation: with a raw (un-EMA'd)
+// buffer rho ~= 0 so N_eff ~= N; pass a smoothingAlpha to discount an EMA-smoothed input.
+// Returns null when there is too little data to estimate a band.
+export function toleranceHalfWidth({ stdDev, sampleCount, k = 2, smoothingAlpha = 0 } = {}) {
+  if (!Number.isFinite(stdDev) || !Number.isFinite(sampleCount) || sampleCount < 2) return null;
+  const rho = smoothingAlpha > 0 ? (1 - smoothingAlpha) : 0;
+  const nEff = rho > 0 ? sampleCount * (1 - rho) / (1 + rho) : sampleCount;
+  const effective = Math.max(1, nEff);
+  return k * stdDev / Math.sqrt(effective);
+}
+
 export function computeSampleQuality({
   sampleBuffer = [],
   orientationOk,
@@ -111,12 +135,29 @@ export function computeSampleQuality({
   stdDevPenalty,
   orientationPenalty,
   calibrationPenalty,
+  // P0-3: trend test. Even a tight range/stdDev can hide a slow ramp; require the
+  // half-to-half drift to stay under driftTol before settling.
+  driftTol = 0.03,
+  // P0-5: a non-finite chosen axis / implausible gravity means there is no real reading.
+  // When false, settle/save are blocked and an explicit message is surfaced.
+  readingOk = true,
+  // P0-6: quasi-static motion gate. When false (|g| outside band or high rotation),
+  // dispersion may look stable but we must reject the capture.
+  motionOk = true,
+  // P1-6: stream health. When false (no fresh sensor event in the staleness window),
+  // any settle is voided.
+  streamOk = true,
+  // P1-4: discount N for autocorrelation if the buffer is EMA-smoothed (raw buffer => 0).
+  smoothingAlpha = 0,
 }) {
   const range = sampleBuffer.length ? Math.max(...sampleBuffer) - Math.min(...sampleBuffer) : 0;
   const stdDev = standardDeviation(sampleBuffer);
   const avg = sampleBuffer.length ? average(sampleBuffer) : 0;
+  const drift = bufferDrift(sampleBuffer);
   const enoughSamples = sampleBuffer.length >= minSampleCount;
-  const stableNow = enoughSamples && range <= settledRange && stdDev <= settledStdDev && orientationOk;
+  const dispersionOk = range <= settledRange && stdDev <= settledStdDev && drift <= driftTol;
+  const stableNow = enoughSamples && dispersionOk && orientationOk && readingOk && motionOk && streamOk;
+  const toleranceDeg = toleranceHalfWidth({ stdDev, sampleCount: sampleBuffer.length, smoothingAlpha });
 
   let confidence = Math.round(maxConfidenceBase - (range * rangePenalty) - (stdDev * stdDevPenalty));
   if (!orientationOk) confidence -= orientationPenalty;
@@ -148,10 +189,37 @@ export function computeSampleQuality({
     avg,
     range,
     stdDev,
+    drift,
+    toleranceDeg,
+    readingOk,
+    motionOk,
+    streamOk,
     confidence,
     settled,
     aligned,
     settledStart: nextSettledStart,
     alignedStart: nextAlignedStart,
   };
+}
+
+// P0-6 helper: decide whether the device is quasi-static enough to trust a capture.
+// gravityMagnitude may be in m/s^2 (~9.81) or normalized (~1); compare as a RATIO to
+// the expected magnitude so units cancel. rotationRate (deg/s) is optional. Returns true
+// when we cannot judge (no magnitude yet) so this never blocks the Euler-only fallback.
+export function motionIsQuasiStatic({
+  gravityMagnitude,
+  expectedMagnitude = 9.81,
+  ratioBand = 0.06,
+  rotationRate = null,
+  rotationTol = 8,
+} = {}) {
+  if (!Number.isFinite(gravityMagnitude) || gravityMagnitude <= 0) return true;
+  const ratio = gravityMagnitude / expectedMagnitude;
+  const magnitudeOk = Math.abs(ratio - 1) <= ratioBand;
+  if (!magnitudeOk) return false;
+  if (rotationRate && Number.isFinite(rotationRate.alpha) && Number.isFinite(rotationRate.beta) && Number.isFinite(rotationRate.gamma)) {
+    const speed = Math.hypot(rotationRate.alpha, rotationRate.beta, rotationRate.gamma);
+    if (speed > rotationTol) return false;
+  }
+  return true;
 }

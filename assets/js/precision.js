@@ -6,13 +6,16 @@ import { average, captureSeriesStats, clamp } from './domain.js';
 export const SIDES = ['FL', 'FR', 'RL', 'RR'];
 
 export const PRECISION_CONSTANTS = {
-  MIN_PRECISION_CAPTURES_READY: 2,
+  // P1-5: readiness must match the displayed forward target (now 5, up from a mismatched
+  // 2-vs-3), and a precision verdict requires a meaningful minimum of forward captures.
+  MIN_PRECISION_CAPTURES_READY: 5,
+  MIN_PRECISION_CAPTURES_VERDICT: 5,
   REPEATABILITY_RANGE_FACTOR: 120,
   REPEATABILITY_STDDEV_FACTOR: 220,
   REPEATABILITY_REVERSAL_FACTOR: 70,
   REVERSAL_REQUIRED_MISSING_PENALTY: 18,
   REVERSAL_OPTIONAL_MISSING_PENALTY: 8,
-  FORWARD_CAPTURE_TARGET: 3,
+  FORWARD_CAPTURE_TARGET: 5,
   REVERSE_CAPTURE_TARGET: 2,
   INSUFFICIENT_CAPTURE_PENALTY: 10,
   ADJUSTMENT_QUALITY_THRESHOLD: 88,
@@ -28,6 +31,14 @@ export const PRECISION_CONSTANTS = {
   APPROXIMATE_STDDEV: 0.14,
   APPROXIMATE_RANGE: 0.3,
 };
+
+// P1-5: standard error of the mean for a capture series. sigma/sqrt(n), with the +/- 95%
+// half-width (k ~= 2) the UI can surface next to a verdict. Returns null without enough data.
+export function captureStandardError(stats, k = 2) {
+  if (!stats || !Number.isFinite(stats.stdDev) || !Number.isFinite(stats.count) || stats.count < 2) return null;
+  const standardError = stats.stdDev / Math.sqrt(stats.count);
+  return { standardError, toleranceDeg: k * standardError, n: stats.count };
+}
 
 export function baselineSummary(baselinePoints = {}, sides = SIDES, constants = PRECISION_CONSTANTS) {
   const sideStats = sides.reduce((acc, side) => {
@@ -92,7 +103,15 @@ export function precisionSummary({ mode, side, captures = {}, baseline, fixture 
   const reverse = captureSeriesStats(bucket.reverse);
   const needsReverse = !!fixture?.reversible;
   const forwardReady = !!forward && forward.count >= constants.MIN_PRECISION_CAPTURES_READY;
-  const reverseReady = !!reverse && reverse.count >= constants.MIN_PRECISION_CAPTURES_READY;
+  // Reverse sets are intentionally smaller (they only need to expose mounting bias), so they
+  // are gated by their own target rather than the larger forward readiness floor.
+  const reverseReady = !!reverse && reverse.count >= constants.REVERSE_CAPTURE_TARGET;
+  // P1-5: a precision verdict needs a meaningful minimum so a couple of lucky captures
+  // cannot earn an adjustment-grade trust signal.
+  const enoughForVerdict = !!forward && forward.count >= constants.MIN_PRECISION_CAPTURES_VERDICT;
+  // P1-5: trust the spread of the forward set via a proper standard error (sigma/sqrt(n)).
+  const standardError = captureStandardError(forward);
+  const captureCount = (forward?.count || 0) + (reverse?.count || 0);
   const forwardOnlyValue = forward ? forward.mean : null;
   // Reversing the fixture should flip the true angle sign while leaving placement bias behind.
   // Averaging forward + reverse exposes that bias, while subtracting reverse from forward cancels the shared bias back out.
@@ -117,7 +136,7 @@ export function precisionSummary({ mode, side, captures = {}, baseline, fixture 
   );
 
   let verdict = 'Need more captures';
-  if (forwardReady && (!needsReverse || reverseReady)) {
+  if (forwardReady && enoughForVerdict && (!needsReverse || reverseReady)) {
     if (repeatabilityScore >= constants.ADJUSTMENT_QUALITY_THRESHOLD
         && baseline?.label === 'Trusted'
         && (!needsReverse || Math.abs(reversalBias || 0) <= constants.MAX_ACCEPTABLE_REVERSAL_BIAS)) {
@@ -140,8 +159,12 @@ export function precisionSummary({ mode, side, captures = {}, baseline, fixture 
     baselineCompensation: baselineComp,
     baseline,
     needsReverse,
-    readyToSave: forwardReady && (!needsReverse || reverseReady),
+    readyToSave: forwardReady && enoughForVerdict && (!needsReverse || reverseReady),
     repeatabilityScore,
+    standardError: standardError ? standardError.standardError : null,
+    toleranceDeg: standardError ? standardError.toleranceDeg : null,
+    captureCount,
+    n: forward?.count || 0,
     verdict,
   };
 }

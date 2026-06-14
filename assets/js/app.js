@@ -6,6 +6,7 @@ import {
   computeSampleQuality,
   gravityFromEuler,
   inclinationForMode,
+  motionIsQuasiStatic,
   polarPoint,
   standardDeviation,
 } from './domain.js';
@@ -77,7 +78,20 @@ const MIN_SAMPLE_COUNT = 6;
 const SETTLED_RANGE = 0.18;
 const SETTLED_STDDEV = 0.08;
 const SETTLED_HOLD_MS = 900;
-const PRECISION_CAPTURE_TARGET = 3;
+// P0-3 drift gate: half-to-half trend of the RAW buffer must stay under this before settling.
+const SETTLED_DRIFT = 0.03;
+// P0-6 motion gate: |gravity| must stay within this ratio of expected (~9.81 m/s^2 or ~1g),
+// and rotation under ROTATION_TOL deg/s, before a settle is allowed.
+const MOTION_RATIO_BAND = 0.06;
+const ROTATION_TOL = 8;
+// P1-6 stream health: if no fresh sensor event arrives within this window, void the settle.
+const STREAM_STALE_MS = 250;
+// P1-6 device reference staleness: warn when the saved device profile is older than this.
+const DEVICE_PROFILE_STALE_MS = 6 * 60 * 60 * 1000;
+// P1-5: forward precision sets need to reach the 5-capture verdict minimum, so the ring
+// buffer keeps a little headroom above it. Baseline points keep their own smaller cap.
+const PRECISION_CAPTURE_TARGET = 6;
+const BASELINE_POINT_TARGET = 3;
 const BASELINE_CAPTURE_TARGET = 2;
 
 const state = {
@@ -94,12 +108,25 @@ const state = {
   gravityMagnitude: null,
   gravityFresh: false,
   smoothedGravity: { x: null, y: null, z: null },
+  // Latest devicemotion rotationRate (deg/s) for the P0-6 quasi-static motion gate.
+  rotationRate: null,
+  // Timestamp (event.timeStamp / performance.now domain) of the last sensor event, for the
+  // P1-6 stream-health staleness check; lastSensorWallTime is the Date.now() equivalent.
+  lastSensorEventTime: 0,
+  lastSensorWallTime: 0,
+  // P0-5: true while the chosen gravity/axis yields no finite reading (don't feed 0 in).
+  readingMissing: false,
   calibrationOffsets: defaultOffsets(),
   calibrationMeta: defaultCalibrationMeta(),
   deviceProfile: null,
   fixtureProfiles: [],
   precisionSession: defaultPrecisionSession(),
   sampleBuffer: [],
+  // P0-3: parallel ring buffer of the UN-smoothed calibrated angle. Stability, drift, and
+  // confidence are computed on THIS buffer; sampleBuffer (EMA-smoothed) drives only display.
+  rawSampleBuffer: [],
+  // P1-4: 95% +/- half-width in degrees for the current live reading (null until estimable).
+  toleranceDeg: null,
   confidence: 0,
   settled: false,
   settledStart: 0,
@@ -345,6 +372,11 @@ function formatTime(isoString) {
   return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
+// P1-4: render the +/- 95% band in degrees, e.g. "±0.04°". Null until enough samples.
+function formatTolerance(value) {
+  return Number.isFinite(value) ? `±${value.toFixed(2)}°` : '±—';
+}
+
 function activeFixture() {
   return state.fixtureProfiles.find(item => item.id === state.precisionSession.fixtureId) || null;
 }
@@ -410,10 +442,19 @@ function orientationLabel(value) {
   return value === 'landscape' ? 'Landscape' : 'Portrait';
 }
 
-// Pick the best available gravity vector: fresh smoothed devicemotion gravity (the
-// robust source that bypasses the Euler gimbal-lock/clamp), else reconstruct it from
-// the smoothed orientation Euler angles (weak for camber near beta ~= ±90).
-function gravityForAngle() {
+// Pick the best available gravity vector: fresh devicemotion gravity (the robust source
+// that bypasses the Euler gimbal-lock/clamp), else reconstruct it from the orientation
+// Euler angles (weak for camber near beta ~= ±90). `useRaw` chooses the UN-smoothed
+// components/angles (P0-3: stability must be measured on the raw stream), while the
+// default smoothed source drives the displayed needle/bubble.
+function gravityForAngle(useRaw = false) {
+  if (useRaw) {
+    const g = state.gravity;
+    if (state.gravityFresh && g && Number.isFinite(g.x) && Number.isFinite(g.y) && Number.isFinite(g.z)) {
+      return { x: g.x, y: g.y, z: g.z };
+    }
+    return gravityFromEuler({ beta: state.beta, gamma: state.gamma });
+  }
   const sg = state.smoothedGravity;
   if (state.gravityFresh && Number.isFinite(sg.x) && Number.isFinite(sg.y) && Number.isFinite(sg.z)) {
     return { x: sg.x, y: sg.y, z: sg.z };
@@ -421,8 +462,8 @@ function gravityForAngle() {
   return gravityFromEuler(state.smoothed);
 }
 
-function rawAngleForMode(mode = state.mode) {
-  const gravity = gravityForAngle();
+function rawAngleForMode(mode = state.mode, useRaw = false) {
+  const gravity = gravityForAngle(useRaw);
   const angle = inclinationForMode(mode, gravity);
   // The bias subtraction shape from the Euler era is preserved (a later stage fixes it),
   // but it now applies in the ANGLE domain rather than to a single raw Euler axis.
@@ -439,6 +480,12 @@ function calibratedAngle(mode = state.mode) {
   return raw === null ? null : raw - (state.calibrationOffsets[mode] || 0);
 }
 
+// P0-3: the un-smoothed calibrated angle that feeds rawSampleBuffer (stability/drift/conf).
+function rawCalibratedAngle(mode = state.mode) {
+  const raw = rawAngleForMode(mode, true);
+  return raw === null ? null : raw - (state.calibrationOffsets[mode] || 0);
+}
+
 function sampleAverage() {
   if (!state.sampleBuffer.length) {
     const angle = calibratedAngle();
@@ -447,17 +494,22 @@ function sampleAverage() {
   return average(state.sampleBuffer);
 }
 
+// Stability metrics report on the RAW (un-EMA'd) buffer so displayed spread/σ match the
+// gate that decides settled (P0-3); the smoothed buffer is only for the displayed value.
 function sampleRange() {
-  if (!state.sampleBuffer.length) return 0;
-  return Math.max(...state.sampleBuffer) - Math.min(...state.sampleBuffer);
+  if (!state.rawSampleBuffer.length) return 0;
+  return Math.max(...state.rawSampleBuffer) - Math.min(...state.rawSampleBuffer);
 }
 
 function sampleStdDev() {
-  return standardDeviation(state.sampleBuffer);
+  return standardDeviation(state.rawSampleBuffer);
 }
 
 function resetLiveAveraging() {
   state.sampleBuffer = [];
+  state.rawSampleBuffer = [];
+  state.toleranceDeg = null;
+  state.readingMissing = false;
   state.confidence = 0;
   state.settled = false;
   state.settledStart = 0;
@@ -472,12 +524,46 @@ function pushSample(value) {
   }
 }
 
+function pushRawSample(value) {
+  state.rawSampleBuffer.push(value);
+  if (state.rawSampleBuffer.length > SAMPLE_WINDOW) {
+    state.rawSampleBuffer.shift();
+  }
+}
+
+// P1-6: has a fresh sensor event arrived recently enough to trust a live settle?
+function streamIsHealthy(now = Date.now()) {
+  return !!state.lastSensorWallTime && (now - state.lastSensorWallTime) <= STREAM_STALE_MS;
+}
+
+// P1-6: warn when the saved device reference is older than the staleness window.
+function deviceProfileIsStale(now = Date.now()) {
+  if (!state.deviceProfile?.time) return false;
+  const captured = new Date(state.deviceProfile.time).getTime();
+  if (Number.isNaN(captured)) return false;
+  return (now - captured) > DEVICE_PROFILE_STALE_MS;
+}
+
 function updateSampleQuality() {
+  const now = Date.now();
+  // P0-6: only allow a settle when the device is quasi-static (|g| near expected, low spin).
+  const motionOk = motionIsQuasiStatic({
+    gravityMagnitude: state.gravityFresh ? state.gravityMagnitude : null,
+    ratioBand: MOTION_RATIO_BAND,
+    rotationRate: state.rotationRate,
+    rotationTol: ROTATION_TOL,
+  });
+  // P1-6: void settle if the sensor stream has gone stale.
+  const streamOk = streamIsHealthy(now);
+  // P0-5: block settle when the current reading is missing (no finite gravity-derived angle).
+  const readingOk = !state.readingMissing;
+  // P0-3: stability/drift/confidence are computed on the RAW (un-EMA'd) buffer; with rho~0
+  // the tolerance N_eff ~= N so smoothingAlpha stays 0 here.
   const result = computeSampleQuality({
-    sampleBuffer: state.sampleBuffer,
+    sampleBuffer: state.rawSampleBuffer,
     orientationOk: state.orientationOk,
     calibrationSet: !!state.calibrationMeta[state.mode],
-    now: Date.now(),
+    now,
     settledStart: state.settledStart,
     alignedStart: state.alignedStart,
     alignedThreshold: ALIGNED_THRESHOLD,
@@ -491,12 +577,18 @@ function updateSampleQuality() {
     stdDevPenalty: STDDEV_PENALTY,
     orientationPenalty: ORIENTATION_PENALTY,
     calibrationPenalty: CALIBRATION_PENALTY,
+    driftTol: SETTLED_DRIFT,
+    readingOk,
+    motionOk,
+    streamOk,
+    smoothingAlpha: 0,
   });
   state.settledStart = result.settledStart;
   state.alignedStart = result.alignedStart;
   state.settled = result.settled;
   state.aligned = result.aligned;
   state.confidence = result.confidence;
+  state.toleranceDeg = result.toleranceDeg;
 }
 
 function loadState() {
@@ -600,6 +692,8 @@ function loadState() {
         side: item.side,
         value: Number(item.value),
         confidence: Number.isFinite(item.confidence) ? item.confidence : 0,
+        // P1-4: tolerate older readings saved before the +/- band existed.
+        toleranceDeg: Number.isFinite(item.toleranceDeg) ? Number(item.toleranceDeg) : null,
         samples: Number.isFinite(item.samples) ? item.samples : 0,
         time: typeof item.time === 'string' ? item.time : new Date().toISOString(),
         workflow: item.workflow === 'precision' ? 'precision' : 'quick',
@@ -705,9 +799,18 @@ function onMotion(event) {
 
   state.gravity = { x: g.x, y: g.y, z: g.z };
   state.gravityTime = Date.now();
-  // |g| is exposed for a later-stage motion gate (device is being moved when |g| strays
-  // far from 1g); no gate is applied here.
+  // |g| feeds the P0-6 quasi-static motion gate: when the device is moved/pressed, |g|
+  // strays from the expected magnitude (~9.81 m/s^2 or ~1g) and the settle is rejected.
   state.gravityMagnitude = Math.hypot(g.x, g.y, g.z);
+  // P0-6: rotationRate (deg/s) lets the gate reject captures during a press/vibration even
+  // when |g| momentarily looks fine. Absent on some platforms; gate treats null as "unknown".
+  const rr = event.rotationRate;
+  state.rotationRate = rr && Number.isFinite(rr.alpha) && Number.isFinite(rr.beta) && Number.isFinite(rr.gamma)
+    ? { alpha: rr.alpha, beta: rr.beta, gamma: rr.gamma }
+    : null;
+  // P1-6: stamp the stream so staleness can void a settle if events stop arriving.
+  state.lastSensorEventTime = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
+  state.lastSensorWallTime = Date.now();
 
   // Smooth the gravity COMPONENTS before computing any angle (atan2 must see smoothed input).
   ['x', 'y', 'z'].forEach(axis => {
@@ -733,9 +836,18 @@ function onOrientation(event) {
   state.screenOrientation = currentOrientation();
   state.orientationOk = state.screenOrientation === preferredOrientation();
   state.gravityFresh = gravityIsFresh();
+  // P1-6: orientation events keep the stream alive too.
+  state.lastSensorEventTime = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
+  state.lastSensorWallTime = Date.now();
 
+  // Smoothed angle drives the displayed needle/bubble; the raw angle drives stability.
   const sample = calibratedAngle();
+  const rawSample = rawCalibratedAngle();
+  // P0-5: a null reading is a real "no reading", not a 0. Do not push it into either
+  // buffer, and flag readingMissing so the settle/save gate blocks and the UI can say so.
+  state.readingMissing = rawSample === null;
   if (sample !== null) pushSample(sample);
+  if (rawSample !== null) pushRawSample(rawSample);
   updateSampleQuality();
   scheduleLiveRefresh();
 }
@@ -1119,12 +1231,14 @@ function performGuideAction() {
 function precisionSaveReason(summary = precisionSummary(state.mode, state.selectedSide)) {
   if (!Number.isFinite(summary.finalValue)) return 'Capture repeated readings before saving.';
   if (!summary.forward || summary.forward.count < PRECISION_CONSTANTS.MIN_PRECISION_CAPTURES_READY) {
-    return `Need ${PRECISION_CONSTANTS.MIN_PRECISION_CAPTURES_READY} forward captures.`;
+    // P1-5: state how many captures are still needed against the displayed forward target.
+    return `Need ${PRECISION_CONSTANTS.MIN_PRECISION_CAPTURES_READY} forward captures (have ${summary.forward?.count || 0}).`;
   }
-  if (summary.needsReverse && (!summary.reverse || summary.reverse.count < PRECISION_CONSTANTS.MIN_PRECISION_CAPTURES_READY)) {
-    return `Need ${PRECISION_CONSTANTS.MIN_PRECISION_CAPTURES_READY} reversed captures.`;
+  if (summary.needsReverse && (!summary.reverse || summary.reverse.count < PRECISION_CONSTANTS.REVERSE_CAPTURE_TARGET)) {
+    return `Need ${PRECISION_CONSTANTS.REVERSE_CAPTURE_TARGET} reversed captures (have ${summary.reverse?.count || 0}).`;
   }
-  return `${summary.verdict} • ${summary.repeatabilityScore}% repeatability.`;
+  // P1-5: surface n with the verdict so trust is read alongside the capture count.
+  return `${summary.verdict} • ${summary.repeatabilityScore}% repeatability • n=${summary.n}.`;
 }
 
 function captureBaselinePoint(side) {
@@ -1149,7 +1263,7 @@ function captureBaselinePoint(side) {
     return;
   }
   state.precisionSession.baselinePoints[side].push(buildCaptureSnapshot());
-  state.precisionSession.baselinePoints[side] = state.precisionSession.baselinePoints[side].slice(-PRECISION_CAPTURE_TARGET);
+  state.precisionSession.baselinePoints[side] = state.precisionSession.baselinePoints[side].slice(-BASELINE_POINT_TARGET);
   saveState();
   setNotice(`Captured baseline point for ${side}.`, 'good');
   refreshUI();
@@ -1191,7 +1305,13 @@ function capturePrecisionReading(direction) {
 }
 
 function saveQuickMeasurement() {
-  if (!state.sampleBuffer.length) {
+  // P0-5: a missing reading must block save with an explicit message, not save a 0.
+  if (state.readingMissing) {
+    setNotice('No reading right now — no gravity-derived angle is available for this mode. Hold steady and try again.', 'warn');
+    refreshUI();
+    return;
+  }
+  if (!state.rawSampleBuffer.length) {
     setNotice('Wait for a few sensor samples before saving.', 'warn');
     refreshUI();
     return;
@@ -1208,6 +1328,8 @@ function saveQuickMeasurement() {
     side: state.selectedSide,
     value: Number(sampleAverage().toFixed(2)),
     confidence: state.confidence,
+    // P1-4: the +/- 95% band travels with the saved reading.
+    toleranceDeg: Number.isFinite(state.toleranceDeg) ? Number(state.toleranceDeg.toFixed(3)) : null,
     samples: state.sampleBuffer.length,
     time: new Date().toISOString(),
     workflow: 'quick',
@@ -1245,6 +1367,8 @@ function savePrecisionMeasurement() {
     value: Number(summary.finalValue.toFixed(2)),
     // Precision confidence averages live stability with cross-capture agreement so one shaky moment or one clean batch cannot dominate the saved trust signal by itself.
     confidence: Math.round((state.confidence + summary.repeatabilityScore) / 2),
+    // P1-4 / P1-5: the +/- band here comes from the forward set's standard error (sigma/sqrt(n)).
+    toleranceDeg: Number.isFinite(summary.toleranceDeg) ? Number(summary.toleranceDeg.toFixed(3)) : null,
     samples: (summary.forward?.count || 0) + (summary.reverse?.count || 0),
     time: new Date().toISOString(),
     workflow: 'precision',
@@ -1353,7 +1477,9 @@ function refreshReadiness() {
     : state.settled;
   const saveReason = state.workflow === 'precision'
     ? precisionSaveReason(summary)
-    : (state.settled ? 'Settled average is ready.' : `${state.sampleBuffer.length}/${SAMPLE_WINDOW} samples • hold steady.`);
+    : (state.readingMissing
+        ? 'No reading available for this mode yet.'
+        : (state.settled ? 'Settled average is ready.' : `${state.rawSampleBuffer.length}/${SAMPLE_WINDOW} samples • hold steady.`));
   const liveState = !state.sensorListenerAttached
     ? 'Paused'
     : (!state.sampleBuffer.length ? 'Waiting' : (state.settled ? 'Settled' : 'Settling'));
@@ -1372,21 +1498,34 @@ function refreshStatus() {
   const range = sampleRange();
   const stdDev = sampleStdDev();
   const calMeta = state.calibrationMeta[state.mode];
+  // P0-5 / P1-6: a missing reading or a lost stream takes priority in the stability chip.
+  const streamLost = state.sensorListenerAttached && state.rawSampleBuffer.length && !streamIsHealthy();
   const stabilityValue = !state.sensorListenerAttached
     ? 'Paused'
-    : (!state.sampleBuffer.length ? 'Waiting' : (state.settled ? 'Settled' : 'Stabilizing'));
+    : (state.readingMissing
+        ? 'No reading'
+        : (streamLost
+            ? 'Stream lost'
+            : (!state.rawSampleBuffer.length ? 'Waiting' : (state.settled ? 'Settled' : 'Stabilizing'))));
   const stabilitySub = !state.sensorListenerAttached
     ? 'Telemetry stopped'
-    : (!state.sampleBuffer.length
-        ? 'Need motion samples'
-        : `${state.sampleBuffer.length}/${SAMPLE_WINDOW} samples • spread ${formatNumber(range)}°`);
+    : (state.readingMissing
+        ? 'No gravity-derived angle for this mode'
+        : (streamLost
+            ? 'Sensor stream lost — hold and retry'
+            : (!state.rawSampleBuffer.length
+                ? 'Need motion samples'
+                : `${state.rawSampleBuffer.length}/${SAMPLE_WINDOW} samples • spread ${formatNumber(range)}°`)));
   const orientationText = `${orientationLabel(state.screenOrientation)} ${state.orientationOk ? '✓' : '✕'}`;
 
   el('chip-stability').textContent = stabilityValue;
   el('chip-stability-sub').textContent = stabilitySub;
-  el('chip-confidence').textContent = `${state.confidence}%`;
+  // P1-4: confidence chip now leads with the honest +/- band in degrees.
+  el('chip-confidence').textContent = Number.isFinite(state.toleranceDeg)
+    ? formatTolerance(state.toleranceDeg)
+    : `${state.confidence}%`;
   el('chip-confidence-sub').textContent = state.sensorListenerAttached
-    ? `σ ${formatNumber(stdDev)}° • averaged live feed`
+    ? `${state.confidence}% • σ ${formatNumber(stdDev)}° • raw live feed`
     : 'Start Measuring to refresh confidence';
   el('chip-orientation').textContent = orientationText;
   el('chip-orientation-sub').textContent = `Preferred for ${state.mode}: ${MODE_GUIDES[state.mode].orientation}`;
@@ -1409,10 +1548,20 @@ function refreshGauge() {
   updateNeedle(avg);
   drawBubble(avg);
   el('gauge-mode-label').textContent = MODE_LABELS[state.mode];
-  el('avg-display').textContent = `Avg ${formatSigned(avg)} from ${state.sampleBuffer.length} sample${state.sampleBuffer.length === 1 ? '' : 's'}`;
+  // P1-4: surface the +/- band alongside the averaged value when it is estimable.
+  const band = Number.isFinite(state.toleranceDeg) ? ` ${formatTolerance(state.toleranceDeg)}` : '';
+  el('avg-display').textContent = `Avg ${formatSigned(avg)}${band} from ${state.sampleBuffer.length} sample${state.sampleBuffer.length === 1 ? '' : 's'}`;
+  // P0-5 / P1-6: the confidence label states the blocking condition rather than a bare %.
+  const streamLost = state.sensorListenerAttached && state.rawSampleBuffer.length && !streamIsHealthy();
   el('confidence-label').textContent = !state.sensorListenerAttached
     ? `Confidence ${state.confidence}% • Paused`
-    : (state.settled ? `Confidence ${state.confidence}% • Settled` : `Confidence ${state.confidence}% • Live`);
+    : (state.readingMissing
+        ? 'No reading • hold the phone steady'
+        : (streamLost
+            ? 'Sensor stream lost'
+            : (state.settled
+                ? `Confidence ${state.confidence}% ${formatTolerance(state.toleranceDeg)} • Settled`
+                : `Confidence ${state.confidence}% • Live`)));
 }
 
 function refreshCalibrationCard() {
@@ -1441,9 +1590,13 @@ function refreshPrecisionCard() {
     ? 'Capture around-the-car level points until the baseline plane is complete and stable.'
     : 'Use repeated settled captures with the same fixture profile, then add reversed captures if the jig supports it.';
 
-  el('device-profile-status').textContent = state.deviceProfile ? 'Ready' : 'Not set';
+  // P1-6: warn when the saved device reference is older than the staleness window.
+  const deviceStale = deviceProfileIsStale();
+  el('device-profile-status').textContent = state.deviceProfile ? (deviceStale ? 'Stale' : 'Ready') : 'Not set';
   el('device-profile-sub').textContent = state.deviceProfile
-    ? `${state.deviceProfile.label} • β ${formatSigned(state.deviceProfile.axisBias.beta)} • γ ${formatSigned(state.deviceProfile.axisBias.gamma)}`
+    ? (deviceStale
+        ? `Reference set ${formatTime(state.deviceProfile.time)} is stale — re-capture before trusting it.`
+        : `${state.deviceProfile.label} • β ${formatSigned(state.deviceProfile.axisBias.beta)} • γ ${formatSigned(state.deviceProfile.axisBias.gamma)}`)
     : 'Capture on a trusted flat or vertical reference.';
   el('fixture-status').textContent = fixture ? fixture.name : 'Not set';
   el('fixture-status-sub').textContent = fixture
@@ -1454,7 +1607,9 @@ function refreshPrecisionCard() {
     ? `Front ${formatSigned(baseline.frontRearDelta || 0)} • Left ${formatSigned(baseline.leftRightDelta || 0)}`
     : `${baseline.completedSides}/4 points captured in Level mode.`;
   el('precision-trust-status').textContent = summary.verdict;
-  el('precision-trust-sub').textContent = `Repeatability ${summary.repeatabilityScore}% • ${summary.needsReverse ? 'Reverse required' : 'Forward-only fixture'}`;
+  // P1-4 / P1-5: surface n and the +/- band next to the verdict.
+  const trustBand = Number.isFinite(summary.toleranceDeg) ? ` • ${formatTolerance(summary.toleranceDeg)}` : '';
+  el('precision-trust-sub').textContent = `Repeatability ${summary.repeatabilityScore}% • n=${summary.n}${trustBand} • ${summary.needsReverse ? 'Reverse required' : 'Forward-only fixture'}`;
   el('precision-summary-device').textContent = state.deviceProfile ? 'Device OK' : 'Device missing';
   el('precision-summary-fixture').textContent = fixture ? 'Fixture OK' : 'Fixture missing';
   el('precision-summary-baseline').textContent = baseline.complete ? `Baseline ${baseline.label}` : `Baseline ${baseline.completedSides}/4`;
@@ -1508,7 +1663,8 @@ function refreshPrecisionCard() {
   el('precision-target-sub').textContent = fixture
     ? `${fixture.name} • ${fixture.reversible ? 'capture both directions' : 'single orientation fixture'}`
     : 'Use the same jig and phone placement for every capture.';
-  el('precision-capture-counts').textContent = `${summary.forward?.count || 0} / ${summary.reverse?.count || 0}`;
+  // P1-5: show captures against the displayed targets so n vs target is explicit.
+  el('precision-capture-counts').textContent = `${summary.forward?.count || 0}/${PRECISION_CONSTANTS.FORWARD_CAPTURE_TARGET} / ${summary.reverse?.count || 0}/${PRECISION_CONSTANTS.REVERSE_CAPTURE_TARGET}`;
   el('precision-capture-sub').textContent = summary.needsReverse
     ? 'Forward count first, reversed count second.'
     : 'Forward count shown first; reverse is optional for this fixture.';
@@ -1629,9 +1785,10 @@ function refreshSavedReadings() {
   el('saved-side-note').textContent = current
     ? [
         `Saved ${formatTime(current.time)}`,
+        Number.isFinite(current.toleranceDeg) ? formatTolerance(current.toleranceDeg) : null,
         current.workflow === 'precision' ? `precision ${current.repeatabilityScore || 0}%` : `${current.confidence}% confidence`,
         current.workflow === 'precision' && current.trustVerdict ? current.trustVerdict : `${current.samples} samples`,
-      ].join(' • ')
+      ].filter(Boolean).join(' • ')
     : `Hold the phone steady until it settles, then tap ${state.workflow === 'precision' ? 'Save Precision' : 'Save Avg'}.`;
 
   const frontDelta = deltaFor(state.mode, 'FL', 'FR');
@@ -1659,9 +1816,12 @@ function refreshSavedReadings() {
     const metaWrap = document.createElement('div');
     const label = buildElement('div', 'saved-label', item.side);
     const metaParts = [`Saved ${formatTime(item.time)}`];
+    // P1-4: lead with the +/- band when the reading carries one.
+    if (Number.isFinite(item.toleranceDeg)) metaParts.push(formatTolerance(item.toleranceDeg));
     if (item.workflow === 'precision') {
       metaParts.push(`${item.repeatabilityScore || 0}% repeatability`);
-      if (item.trustVerdict) metaParts.push(item.trustVerdict);
+      // P1-5: surface n alongside the verdict so trust is tied to capture count.
+      if (item.trustVerdict) metaParts.push(`${item.trustVerdict} (n=${item.captureCount || item.samples || 0})`);
       if (item.reversalBias !== null && item.reversalBias !== undefined) metaParts.push(`bias ${formatSigned(item.reversalBias)}`);
     } else {
       metaParts.push(`${item.confidence}% confidence`);

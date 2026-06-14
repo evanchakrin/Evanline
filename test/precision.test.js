@@ -86,7 +86,8 @@ test('precisionSummary cancels reversal bias and reports a final value when read
     'camber:FL': {
       mode: 'camber',
       side: 'FL',
-      forward: [{ value: 1.05 }, { value: 1.04 }, { value: 1.06 }],
+      // P1-5: a verdict now needs at least MIN_PRECISION_CAPTURES_VERDICT (5) forward captures.
+      forward: [{ value: 1.05 }, { value: 1.04 }, { value: 1.06 }, { value: 1.05 }, { value: 1.05 }],
       // Reversed captures flip sign of the true angle but keep the same +0.05 mounting bias.
       reverse: [{ value: -0.95 }, { value: -0.96 }],
     },
@@ -102,6 +103,33 @@ test('precisionSummary cancels reversal bias and reports a final value when read
   assert.ok(Math.abs(summary.reversalBias - 0.05) < 0.01);
   assert.ok(Math.abs(summary.reversalCorrectedValue - 1.0) < 0.01);
   assert.ok(Number.isFinite(summary.finalValue));
+  // P1-5: n and the standard-error band travel with the verdict.
+  assert.equal(summary.n, 5);
+  assert.ok(Number.isFinite(summary.toleranceDeg));
+});
+
+test('precisionSummary blocks the verdict until the minimum capture count is met', () => {
+  const baseline = baselineSummary({
+    FL: [{ value: 0 }], FR: [{ value: 0 }], RL: [{ value: 0 }], RR: [{ value: 0 }],
+  });
+  // Three clean forward captures clear MIN_PRECISION_CAPTURES_READY but not the verdict floor.
+  const captures = {
+    'camber:FL': {
+      mode: 'camber',
+      side: 'FL',
+      forward: [{ value: 1.05 }, { value: 1.04 }, { value: 1.06 }],
+      reverse: [],
+    },
+  };
+  const summary = precisionSummary({
+    mode: 'camber',
+    side: 'FL',
+    captures,
+    baseline,
+    fixture: { reversible: false },
+  });
+  assert.equal(summary.readyToSave, false);
+  assert.equal(summary.verdict, 'Need more captures');
 });
 
 test('computeGuideState surfaces sensor permission first', () => {
@@ -137,4 +165,12 @@ test('computeGuideState reaches the save step once everything is satisfied', () 
 test('PRECISION_CONSTANTS keep the documented quality thresholds', () => {
   assert.equal(PRECISION_CONSTANTS.ADJUSTMENT_QUALITY_THRESHOLD, 88);
   assert.equal(PRECISION_CONSTANTS.COMPARISON_QUALITY_THRESHOLD, 68);
+});
+
+test('PRECISION_CONSTANTS keep readiness in step with the displayed target', () => {
+  // P1-5: readiness must equal the displayed forward target, and a verdict needs a
+  // meaningful minimum (>= 5) captures.
+  assert.equal(PRECISION_CONSTANTS.MIN_PRECISION_CAPTURES_READY, PRECISION_CONSTANTS.FORWARD_CAPTURE_TARGET);
+  assert.equal(PRECISION_CONSTANTS.MIN_PRECISION_CAPTURES_VERDICT, 5);
+  assert.ok(PRECISION_CONSTANTS.MIN_PRECISION_CAPTURES_VERDICT >= 5);
 });
