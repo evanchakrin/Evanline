@@ -691,6 +691,10 @@
       gap: 10px;
     }
     .hidden-panel { display: none; }
+    /* "Workflows + results only" view: hides non-essential panes (live gauge, bubble,
+       status chips, manual action row, standalone calibration card, advanced data) while
+       leaving their elements in the DOM so the existing refresh*/el() code keeps working. */
+    .pane-hidden { display: none !important; }
     .precision-card {
       align-items: stretch;
       gap: 12px;
