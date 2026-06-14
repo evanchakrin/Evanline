@@ -11,6 +11,7 @@ import {
   clamp,
   clampAngle,
   computeSampleQuality,
+  flipSelfTest,
   gravityFromEuler,
   inclinationForMode,
   levelDeg,
@@ -353,6 +354,40 @@ test('preferredOrientationForMode maps modes to their orientation family', () =>
   assert.equal(preferredOrientationForMode('toe'), 'portrait');
   assert.equal(preferredOrientationForMode('level'), 'landscape');
   assert.equal(preferredOrientationForMode('pitch'), 'landscape');
+});
+
+test('flipSelfTest reports residual bias, asymmetry, and pass/fail for a 180° flip (P0-7)', () => {
+  // A perfect inclinometer reads equal-and-opposite after the flip: +1.0 then -1.0.
+  const perfect = flipSelfTest(1.0, -1.0);
+  assert.equal(round2(perfect.residualBias), 0);
+  assert.equal(round2(perfect.asymmetry), 0);
+  assert.equal(round2(perfect.corrected), 1.0);
+  assert.equal(perfect.passed, true);
+
+  // A constant +0.5° sensor zero error does NOT flip, so it shows up as the residual bias and
+  // pushes the pair out of symmetry: readings 1.5 and -0.5 -> bias 0.5, asymmetry 1.0.
+  const biased = flipSelfTest(1.5, -0.5);
+  assert.equal(round2(biased.residualBias), 0.5);
+  assert.equal(round2(biased.asymmetry), 1.0);
+  // The bias-cancelled true angle is still recovered: (1.5 - (-0.5)) / 2 = 1.0.
+  assert.equal(round2(biased.corrected), 1.0);
+  // 0.5° exceeds the default 0.2° tolerance, so the self-test fails.
+  assert.equal(biased.passed, false);
+
+  // A tiny bias inside tolerance passes.
+  const withinTol = flipSelfTest(1.05, -0.95);
+  assert.equal(round2(withinTol.residualBias), 0.05);
+  assert.equal(withinTol.passed, true);
+
+  // A custom (looser) tolerance flips the verdict for the same readings.
+  assert.equal(flipSelfTest(1.5, -0.5, 0.6).passed, true);
+
+  // Non-finite readings yield null fields and never pass.
+  const missing = flipSelfTest(1.0, NaN);
+  assert.equal(missing.residualBias, null);
+  assert.equal(missing.asymmetry, null);
+  assert.equal(missing.corrected, null);
+  assert.equal(missing.passed, false);
 });
 
 test('calibrationZeroValid binds a stored zero to its capture orientation family (P1-3a)', () => {

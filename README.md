@@ -9,8 +9,8 @@ Uses the iPhone's built-in **gyroscope & accelerometer** (DeviceOrientation API)
 
 | Feature | Details |
 |---|---|
-| **Camber mode** | Measure wheel camber angle (tilt relative to vertical) |
-| **Toe mode** | Approximate toe-in / toe-out angle with a dedicated zero workflow |
+| **Camber mode** | Measure wheel-face camber angle (tilt relative to vertical) |
+| **Toe (experimental)** | Toe is **not** a sensor reading — a gravity sensor is blind to rotation about vertical and has no centerline reference. The app links to the geometric method (string lines, turn plates, or `atan(rim offset / rim length)`) instead of reporting a fake toe angle |
 | **Level mode** | Check if the vehicle or surface is left-right level |
 | **Pitch mode** | Measure front-to-back pitch angle |
 | **Sensor smoothing** | Smooths the live feed and averages recent samples before display |
@@ -21,7 +21,8 @@ Uses the iPhone's built-in **gyroscope & accelerometer** (DeviceOrientation API)
 | **Fixture profiles** | Save named jig / fixture setups locally, including whether the fixture is reversible |
 | **Around-car baseline** | Capture FL / FR / RL / RR level points to establish a session baseline plane |
 | **Reversal capture sets** | Pair forward and reversed jig placements to expose mounting bias |
-| **Repeatability scoring** | Score repeated capture sets before accepting a precision measurement |
+| **Trueness self-test** | Guided 180° flip test: read, flip, read again — a healthy inclinometer is equal-and-opposite, so the residual bias `(a+b)/2` should be near zero |
+| **Repeatability scoring** | Score repeated capture sets before accepting a precision measurement (repeatability is *not* trueness) |
 | **Saved side readings** | Store FL / FR / RL / RR readings locally and compare deltas |
 | **Advanced data** | Hide raw sensor values in an expandable debug section |
 | **PWA** | Add to iPhone Home Screen for full-screen experience |
@@ -65,6 +66,19 @@ npx serve .
 4. In **Level** mode, capture baseline points at **FL, FR, RL, and RR**.
 5. For each wheel reading, capture repeated **forward** readings, then repeated **reversed** readings if the fixture is reversible.
 6. Save the measurement only after the app reports good **repeatability**, acceptable **reversal bias**, and a trustworthy **baseline**.
+
+---
+
+## Measurement methodology
+
+Honest measurement matters more than a precise-looking digit. Follow these rules every time:
+
+1. **Verify the surface is actually level first.** Use **Level** mode to confirm the floor or car is level before any alignment reading — a tilted reference contaminates every downstream angle.
+2. **Register to a defined plane every time.** Camber registers to the machined **wheel face** (clear of the curved lip and decorative spokes — wheel-face camber is *not* tire camber); level/pitch register to a fixed body datum. Re-use the exact same surface on every corner.
+3. **Hold quasi-static.** Let the reading **settle**; the app rejects captures while the phone is moving, pressed, or spinning so motion noise cannot leak into the number.
+4. **Do the flip test.** Run the **180° flip self-test** before trusting a value: read, flip the phone 180° about the measurement axis, read again. A true inclinometer reads equal-and-opposite, so the residual bias `(a + b) / 2` should be near zero. Repeatability alone is **not** trueness.
+5. **Toe is geometric.** The phone cannot measure toe. Use string lines, turn plates, or `atan(front-vs-rear rim offset / rim length)`.
+6. **Read the band, not the digit.** Every saved value carries a `± Y.YY° (95%)` confidence band. Treat the band — not the single displayed digit — as the real result.
 
 ---
 

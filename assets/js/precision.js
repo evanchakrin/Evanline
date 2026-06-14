@@ -228,7 +228,10 @@ export function precisionSummary({ mode, side, captures = {}, baseline, fixture 
     if (repeatabilityScore >= constants.ADJUSTMENT_QUALITY_THRESHOLD
         && baseline?.label === 'Trusted'
         && (!needsReverse || Math.abs(reversalBias || 0) <= constants.MAX_ACCEPTABLE_REVERSAL_BIAS)) {
-      verdict = 'Good enough for adjustment';
+      // P0-3 honesty: repeatability is NOT trueness. A tight, reversible-bias-cancelled set proves
+      // the reading is REPEATABLE, but only a comparison against a known reference (or a passed
+      // flip self-test) proves it is TRUE — so the top verdict no longer claims "adjustment grade".
+      verdict = 'Repeatable — verify vs a known reference';
     } else if (repeatabilityScore >= constants.COMPARISON_QUALITY_THRESHOLD) {
       verdict = 'Good enough for comparison';
     } else {
@@ -389,7 +392,7 @@ export function computeGuideState({
       title: '6. Save the precision report',
       description: `Review repeatability, reversal bias, and baseline trust before saving ${mode} for ${selectedSide}.`,
       warning: `${precision.verdict} • Repeatability ${precision.repeatabilityScore}%`,
-      tone: precision.verdict === 'Good enough for adjustment' ? 'good' : 'warn',
+      tone: precision.verdict === 'Repeatable — verify vs a known reference' ? 'good' : 'warn',
     });
   }
   return withPoseHint({

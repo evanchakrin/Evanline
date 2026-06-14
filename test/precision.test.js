@@ -183,6 +183,28 @@ test('precisionSummary cancels reversal bias from RAW means even with a shared z
   assert.ok(Number.isFinite(summary.toleranceDeg));
 });
 
+test('precisionSummary top verdict is honest about repeatability vs trueness (P0-3 rename)', () => {
+  // A clean, reversible, Trusted-baseline set used to read "Good enough for adjustment". The
+  // verdict must now say repeatability is proven but trueness still needs a reference check.
+  const baseline = baselineSummary({
+    FL: [{ value: 0 }], FR: [{ value: 0 }], RL: [{ value: 0 }], RR: [{ value: 0 }],
+  });
+  const cap = v => ({ value: v - 0.2, rawValue: v, offsetUsed: 0.2 });
+  const captures = {
+    'camber:FL': {
+      mode: 'camber',
+      side: 'FL',
+      forward: [cap(1.05), cap(1.04), cap(1.06), cap(1.05), cap(1.05)],
+      reverse: [cap(-0.95), cap(-0.96)],
+    },
+  };
+  const summary = precisionSummary({ mode: 'camber', side: 'FL', captures, baseline, fixture: { reversible: true } });
+  assert.ok(summary.repeatabilityScore >= PRECISION_CONSTANTS.ADJUSTMENT_QUALITY_THRESHOLD);
+  assert.equal(summary.verdict, 'Repeatable — verify vs a known reference');
+  // It must no longer claim adjustment-grade trueness from repeatability alone.
+  assert.doesNotMatch(summary.verdict, /adjustment/i);
+});
+
 test('precisionSummary cancellation is unaffected by the size of the shared zero (P1-1)', () => {
   const baseline = baselineSummary({
     FL: [{ value: 0 }], FR: [{ value: 0 }], RL: [{ value: 0 }], RR: [{ value: 0 }],

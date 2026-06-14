@@ -5,6 +5,7 @@ import {
   captureSeriesStats,
   clampAngle as clampAngleInRange,
   computeSampleQuality,
+  flipSelfTest,
   gravityFromEuler,
   inclinationForMode,
   motionIsQuasiStatic,
@@ -37,7 +38,9 @@ const STDDEV_PENALTY = 420;
 const ALIGNED_HOLD_MS = 500;
 const MODE_LABELS = {
   camber: 'Camber Angle',
-  toe: 'Toe Angle',
+  // P0-2: a gravity sensor is blind to rotation about vertical AND has no vehicle-centerline
+  // reference, so toe is NOT a measured inclination here. Label it experimental everywhere.
+  toe: 'Toe (experimental)',
   level: 'Level (Left / Right)',
   pitch: 'Pitch Angle (Front / Back)',
 };
@@ -49,9 +52,11 @@ const MODE_GUIDES = {
     calibration: 'Zero against a known vertical or repeatable reference before reading camber.',
   },
   toe: {
-    placement: 'Placement: Against wheel or straight edge, pointing forward',
+    // P0-2: toe is geometric, not an inclinometer reading. The "placement" line points the user
+    // at the real method instead of implying the phone can measure toe directly.
+    placement: 'Toe is geometric: measure rim offset front vs rear, not phone tilt',
     orientation: 'Portrait',
-    calibration: 'Zero against a straight-ahead reference before comparing left and right toe.',
+    calibration: 'The phone cannot measure toe — use string lines, turn plates, or atan(offset / rim length).',
   },
   level: {
     placement: 'Placement: On a flat sill, roof, or hub surface',
@@ -92,6 +97,10 @@ const ROTATION_TOL = 8;
 const STREAM_STALE_MS = 250;
 // P1-6 device reference staleness: warn when the saved device profile is older than this.
 const DEVICE_PROFILE_STALE_MS = 6 * 60 * 60 * 1000;
+// P0-7: a 180° flip self-test passes when the residual bias |(a+b)/2| stays under this many
+// degrees, and a pass is considered "recent" (good enough to gate trust wording) for this long.
+const SELF_TEST_TOLERANCE_DEG = 0.2;
+const SELF_TEST_FRESH_MS = 30 * 60 * 1000;
 // P1-5: forward precision sets need to reach the 5-capture verdict minimum, so the ring
 // buffer keeps a little headroom above it. Baseline points keep their own smaller cap.
 const PRECISION_CAPTURE_TARGET = 6;
@@ -151,6 +160,9 @@ const state = {
   notice: null,
   lastSaveConfirmation: null,
   liveRefreshScheduled: false,
+  // P0-7: guided 180° flip trueness self-test. firstReading holds reading A until the flip;
+  // result holds the last {mode, residualBias, asymmetry, corrected, passed, tolerance, time}.
+  selfTest: { mode: null, firstReading: null, result: null },
 };
 
 function defaultOffsets() {
@@ -357,7 +369,9 @@ function directionLabel(angleDeg) {
     return angleDeg > DIRECTION_DEADBAND_DEG ? '▲ Positive Camber' : angleDeg < -DIRECTION_DEADBAND_DEG ? '▼ Negative Camber' : '— Zero Camber';
   }
   if (state.mode === 'toe') {
-    return angleDeg > DIRECTION_DEADBAND_DEG ? '→ Toe Out' : angleDeg < -DIRECTION_DEADBAND_DEG ? '← Toe In' : '— Neutral';
+    // P0-2: never present a toe-in/out direction — the sensor cannot measure toe. Toe mode has no
+    // gravity-derived reading (inclinationForMode('toe') === null), so this is a fixed reminder.
+    return '— Toe is geometric (not a sensor reading)';
   }
   return angleDeg > DIRECTION_DEADBAND_DEG ? '↑ Nose Up' : angleDeg < -DIRECTION_DEADBAND_DEG ? '↓ Nose Down' : '— Flat';
 }
@@ -382,6 +396,14 @@ function formatTime(isoString) {
 // P1-4: render the +/- 95% band in degrees, e.g. "±0.04°". Null until enough samples.
 function formatTolerance(value) {
   return Number.isFinite(value) ? `±${value.toFixed(2)}°` : '±—';
+}
+
+// P0-4 (Stage 5 band display): a saved value read as "+X.XX° ± Y.YY° (95%)" so the band is part
+// of the number, not a footnote. Falls back to the bare signed value when no band is available.
+function formatValueWithBand(value, toleranceDeg) {
+  const base = formatSigned(value);
+  if (!Number.isFinite(toleranceDeg)) return base;
+  return `${base} ${formatTolerance(toleranceDeg)} (95%)`;
 }
 
 function activeFixture() {
@@ -1498,6 +1520,84 @@ function saveMeasurement() {
   saveQuickMeasurement();
 }
 
+// P0-7: is there a passed flip self-test recent enough (and for this mode) to back an
+// adjustment-grade trust claim? Used to gate the "verify vs a known reference" wording.
+function selfTestPassedRecently(mode = state.mode, now = Date.now()) {
+  const result = state.selfTest.result;
+  if (!result || !result.passed || result.mode !== mode) return false;
+  const captured = new Date(result.time).getTime();
+  if (Number.isNaN(captured)) return false;
+  return (now - captured) <= SELF_TEST_FRESH_MS;
+}
+
+// P0-7: guided 180° flip trueness self-test. First press captures reading A; the user flips the
+// phone/jig 180° about the measurement axis; the second press captures reading B and reports the
+// residual bias (a+b)/2, asymmetry |a+b|, and pass/fail. Toe has no sensor reading, so it is
+// excluded. Both readings come from the settled RAW gravity angle (pre-zero) so a per-mode offset
+// cannot mask a real sensor/mount bias.
+function runFlipSelfTest() {
+  if (!state.sensorListenerAttached) {
+    setNotice('Tap Start Measuring before running the flip self-test.', 'warn');
+    refreshUI();
+    return;
+  }
+  if (state.mode === 'toe') {
+    setNotice('Toe has no sensor reading, so the flip self-test does not apply. Measure toe geometrically.', 'warn');
+    refreshUI();
+    return;
+  }
+  if (!state.settled) {
+    setNotice('Hold the phone steady until it settles before capturing a self-test reading.', 'warn');
+    refreshUI();
+    return;
+  }
+  const reading = rawAngleForMode();
+  if (reading === null) {
+    setNotice('No gravity-derived angle is available for this mode yet. Hold steady and try again.', 'warn');
+    refreshUI();
+    return;
+  }
+
+  // A self-test always belongs to one mode; switching modes mid-test discards the pending A.
+  if (state.selfTest.mode !== state.mode) {
+    state.selfTest = { mode: state.mode, firstReading: null, result: null };
+  }
+
+  if (state.selfTest.firstReading === null) {
+    state.selfTest.firstReading = reading;
+    resetLiveAveraging();
+    setNotice(`Self-test reading A captured (${formatSigned(reading)}). Flip the phone 180° about the ${MODE_LABELS[state.mode]} axis, settle, then capture reading B.`, 'good');
+    refreshUI();
+    return;
+  }
+
+  const test = flipSelfTest(state.selfTest.firstReading, reading, SELF_TEST_TOLERANCE_DEG);
+  state.selfTest.result = {
+    mode: state.mode,
+    firstReading: state.selfTest.firstReading,
+    secondReading: reading,
+    residualBias: test.residualBias,
+    asymmetry: test.asymmetry,
+    corrected: test.corrected,
+    passed: test.passed,
+    tolerance: test.tolerance,
+    time: new Date().toISOString(),
+  };
+  state.selfTest.firstReading = null;
+  resetLiveAveraging();
+  setNotice(test.passed
+    ? `Flip self-test PASSED — residual bias ${formatSigned(test.residualBias)} (≤ ${test.tolerance}°). Reading is symmetric.`
+    : `Flip self-test FAILED — residual bias ${formatSigned(test.residualBias)} exceeds ±${test.tolerance}°. Re-seat the fixture or re-zero.`, test.passed ? 'good' : 'warn');
+  refreshUI();
+}
+
+function resetFlipSelfTest() {
+  state.selfTest = { mode: null, firstReading: null, result: null };
+  resetLiveAveraging();
+  setNotice('Flip self-test cleared.', 'warn');
+  refreshUI();
+}
+
 function measurementFor(mode, side) {
   return state.measurements.find(item => item.mode === mode && item.side === side) || null;
 }
@@ -1657,6 +1757,16 @@ function refreshGauge() {
   updateNeedle(avg);
   drawBubble(avg);
   el('gauge-mode-label').textContent = MODE_LABELS[state.mode];
+  // P0-2: toe has no gravity-derived reading, so surface the geometric-method banner and do not
+  // dress the parked-at-0 needle/band as a real toe number.
+  el('toe-explainer').classList.toggle('hidden-panel', state.mode !== 'toe');
+  if (state.mode === 'toe') {
+    // P0-2: do not show an averaged value, a +/- band, or a "hold steady" hint — there is no
+    // sensor reading to settle. Both lines point at the geometric method instead.
+    el('avg-display').textContent = 'No sensor toe value — measure geometrically';
+    el('confidence-label').textContent = 'Toe: use string lines, turn plates, or rim offset';
+    return;
+  }
   // P1-4: surface the +/- band alongside the averaged value when it is estimable.
   const band = Number.isFinite(state.toleranceDeg) ? ` ${formatTolerance(state.toleranceDeg)}` : '';
   el('avg-display').textContent = `Avg ${formatSigned(avg)}${band} from ${state.sampleBuffer.length} sample${state.sampleBuffer.length === 1 ? '' : 's'}`;
@@ -1801,8 +1911,14 @@ function refreshPrecisionCard() {
   el('precision-baseline-plane-sub').textContent = baseline.complete
     ? `Front-Rear ${formatSigned(baseline.frontRearDelta || 0)} • ${baseline.label}`
     : 'Front/rear and left/right averages from Level mode.';
-  el('precision-final-value').textContent = Number.isFinite(summary.finalValue) ? formatSigned(summary.finalValue) : '—';
-  el('precision-final-sub').textContent = `${summary.verdict}${Number.isFinite(summary.reversalCorrectedValue) ? ` • corrected ${formatSigned(summary.reversalCorrectedValue)}` : ''}`;
+  // P1-4 / Stage 5: the precision final value reads "X.XX° ± Y.YY° (95%)".
+  el('precision-final-value').textContent = Number.isFinite(summary.finalValue) ? formatValueWithBand(summary.finalValue, summary.toleranceDeg) : '—';
+  // P0-7: a top verdict only earns adjustment-grade trust once a flip self-test has confirmed
+  // trueness; otherwise spell out that repeatability alone is not trueness.
+  const selfTestNote = selfTestPassedRecently()
+    ? ' • flip self-test passed'
+    : ' • run flip self-test to confirm trueness';
+  el('precision-final-sub').textContent = `${summary.verdict}${selfTestNote}${Number.isFinite(summary.reversalCorrectedValue) ? ` • corrected ${formatSigned(summary.reversalCorrectedValue)}` : ''}`;
   const captureBlockedReason = !fixture
     ? 'Select or save a fixture profile before capturing.'
     : (!state.sensorListenerAttached
@@ -1820,6 +1936,49 @@ function refreshPrecisionCard() {
   el('btn-save-precision').disabled = !summary.readyToSave || !Number.isFinite(summary.finalValue);
   el('btn-save-precision').title = precisionSaveReason(summary);
   el('precision-control-hint').textContent = captureBlocked ? `Capture blocked: ${captureBlockedReason}` : precisionSaveReason(summary);
+  refreshSelfTestCard();
+}
+
+// P0-7: render the guided flip self-test status. Surfaces reading A pending, the last pass/fail
+// with its residual bias and asymmetry, and whether the pass is recent enough to back trust.
+function refreshSelfTestCard() {
+  const btn = el('btn-self-test');
+  const result = state.selfTest.result;
+  const pendingA = state.selfTest.mode === state.mode && state.selfTest.firstReading !== null;
+  const toeBlocked = state.mode === 'toe';
+
+  btn.disabled = !state.sensorListenerAttached || toeBlocked;
+  btn.textContent = pendingA ? 'Capture reading B (after flip)' : 'Capture reading A';
+  btn.title = toeBlocked
+    ? 'Toe has no sensor reading — the flip self-test does not apply.'
+    : (!state.sensorListenerAttached
+        ? 'Tap Start Measuring before running the self-test.'
+        : (pendingA ? 'Flip the phone 180° about the axis, settle, then capture reading B.' : 'Capture the first settled reading.'));
+
+  let status;
+  let sub;
+  if (toeBlocked) {
+    status = 'N/A for toe';
+    sub = 'Toe is geometric — no sensor reading to flip-test.';
+  } else if (pendingA) {
+    status = 'Reading A captured';
+    sub = `A = ${formatSigned(state.selfTest.firstReading)} • flip 180°, settle, capture B.`;
+  } else if (result && result.mode === state.mode) {
+    const fresh = selfTestPassedRecently();
+    status = result.passed ? (fresh ? 'Passed' : 'Passed (stale)') : 'Failed';
+    sub = `A ${formatSigned(result.firstReading)} / B ${formatSigned(result.secondReading)} • asymmetry ${formatNumber(result.asymmetry)}° • ${formatTime(result.time)}`;
+  } else {
+    status = 'Not run';
+    sub = `Run a flip self-test for ${MODE_LABELS[state.mode]} before trusting a save.`;
+  }
+  el('self-test-status').textContent = status;
+  el('self-test-sub').textContent = sub;
+  el('self-test-bias').textContent = result && result.mode === state.mode && Number.isFinite(result.residualBias)
+    ? formatSigned(result.residualBias)
+    : '—';
+  el('self-test-bias-sub').textContent = result && result.mode === state.mode && Number.isFinite(result.asymmetry)
+    ? `Asymmetry |a + b| = ${formatNumber(result.asymmetry)}° (tolerance ±${result.tolerance}°)`
+    : 'Asymmetry |a + b| should be small for a true sensor.';
 }
 
 function refreshLockButton() {
@@ -1900,11 +2059,11 @@ function refreshSavedReadings() {
 
   const current = measurementFor(state.mode, state.selectedSide);
   el('saved-side-title').textContent = `${MODE_LABELS[state.mode]} · ${state.selectedSide}`;
-  el('saved-side-value').textContent = current ? formatSigned(current.value) : 'No saved reading';
+  // P1-4 / Stage 5: the saved-side box leads with the value AND its 95% band as one number.
+  el('saved-side-value').textContent = current ? formatValueWithBand(current.value, current.toleranceDeg) : 'No saved reading';
   el('saved-side-note').textContent = current
     ? [
         `Saved ${formatTime(current.time)}`,
-        Number.isFinite(current.toleranceDeg) ? formatTolerance(current.toleranceDeg) : null,
         current.workflow === 'precision' ? `precision ${current.repeatabilityScore || 0}%` : `${current.confidence}% confidence`,
         current.workflow === 'precision' && current.trustVerdict ? current.trustVerdict : `${current.samples} samples`,
       ].filter(Boolean).join(' • ')
@@ -1913,9 +2072,16 @@ function refreshSavedReadings() {
   const frontDelta = deltaFor(state.mode, 'FL', 'FR');
   const rearDelta = deltaFor(state.mode, 'RL', 'RR');
   el('front-delta').textContent = frontDelta === null ? '—' : formatSigned(frontDelta);
-  el('front-delta-note').textContent = frontDelta === null ? 'Save both front sides for this mode.' : 'A negative delta means FL is smaller than FR.';
   el('rear-delta').textContent = rearDelta === null ? '—' : formatSigned(rearDelta);
-  el('rear-delta-note').textContent = rearDelta === null ? 'Save both rear sides for this mode.' : 'A negative delta means RL is smaller than RR.';
+  if (state.mode === 'toe') {
+    // P0-2: a left/right tilt delta is NOT a toe delta — the sensor cannot read toe, so do not
+    // present these as valid toe-in/out comparisons.
+    el('front-delta-note').textContent = 'Not a toe value — measure toe geometrically (rim offset / rim length).';
+    el('rear-delta-note').textContent = 'Not a toe value — measure toe geometrically (rim offset / rim length).';
+  } else {
+    el('front-delta-note').textContent = frontDelta === null ? 'Save both front sides for this mode.' : 'A negative delta means FL is smaller than FR.';
+    el('rear-delta-note').textContent = rearDelta === null ? 'Save both rear sides for this mode.' : 'A negative delta means RL is smaller than RR.';
+  }
 
   const list = el('saved-list');
   const readings = SIDES
@@ -1935,8 +2101,6 @@ function refreshSavedReadings() {
     const metaWrap = document.createElement('div');
     const label = buildElement('div', 'saved-label', item.side);
     const metaParts = [`Saved ${formatTime(item.time)}`];
-    // P1-4: lead with the +/- band when the reading carries one.
-    if (Number.isFinite(item.toleranceDeg)) metaParts.push(formatTolerance(item.toleranceDeg));
     if (item.workflow === 'precision') {
       metaParts.push(`${item.repeatabilityScore || 0}% repeatability`);
       // P1-5: surface n alongside the verdict so trust is tied to capture count.
@@ -1947,7 +2111,8 @@ function refreshSavedReadings() {
       metaParts.push(`${item.samples} samples`);
     }
     const meta = buildElement('div', 'saved-meta', metaParts.join(' • '));
-    const value = buildElement('strong', 'saved-value', formatSigned(item.value));
+    // P1-4 / Stage 5: the saved value carries its 95% band inline ("X.XX° ± Y.YY° (95%)").
+    const value = buildElement('strong', 'saved-value', formatValueWithBand(item.value, item.toleranceDeg));
 
     metaWrap.appendChild(label);
     metaWrap.appendChild(meta);
@@ -2045,6 +2210,8 @@ function setupEventHandlers() {
       resetDeviceCalibration: () => resetDeviceCalibration(),
       captureBaselinePoint: () => captureBaselinePoint(arg),
       capturePrecisionReading: () => capturePrecisionReading(arg),
+      runFlipSelfTest: () => runFlipSelfTest(),
+      resetFlipSelfTest: () => resetFlipSelfTest(),
       savePrecisionMeasurement: () => savePrecisionMeasurement(),
       calibrate: () => calibrate(),
       saveMeasurement: () => saveMeasurement(),

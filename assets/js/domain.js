@@ -282,3 +282,26 @@ export function motionIsQuasiStatic({
   }
   return true;
 }
+
+// P0-7: 180° flip trueness self-test. A healthy inclinometer reads +θ in one orientation and
+// -θ after a 180° flip about the measurement axis, so the two readings should be equal and
+// opposite. The residual bias = (a + b) / 2 is the constant offset that does NOT flip (sensor
+// zero error, mount tilt), and the asymmetry = |a + b| measures how far the pair is from the
+// ideal a == -b. `passed` is true when the residual bias stays within `tolerance` degrees, so
+// callers can gate adjustment-grade wording on a recent pass. Returns null fields when either
+// reading is non-finite. `corrected` = (a - b) / 2 is the bias-cancelled true angle.
+export function flipSelfTest(firstReading, secondReading, tolerance = 0.2) {
+  if (!Number.isFinite(firstReading) || !Number.isFinite(secondReading)) {
+    return { residualBias: null, asymmetry: null, corrected: null, passed: false, tolerance };
+  }
+  const residualBias = (firstReading + secondReading) / 2;
+  const asymmetry = Math.abs(firstReading + secondReading);
+  const corrected = (firstReading - secondReading) / 2;
+  return {
+    residualBias,
+    asymmetry,
+    corrected,
+    passed: Math.abs(residualBias) <= tolerance,
+    tolerance,
+  };
+}
