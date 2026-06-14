@@ -894,7 +894,17 @@ function onMotion(event) {
   const g = event.accelerationIncludingGravity;
   if (!g || !Number.isFinite(g.x) || !Number.isFinite(g.y) || !Number.isFinite(g.z)) return;
 
-  state.gravity = { x: g.x, y: g.y, z: g.z };
+  // SIGN NORMALIZATION (Stage 7 fix): gravityFromEuler returns the gravity-DIRECTION unit
+  // vector (flat screen-up => z = -1). iOS Safari's accelerationIncludingGravity is the
+  // device-frame specific-force vector, NEGATED relative to that direction (flat screen-up
+  // reads z ~= +9.81). Both sources feed the SAME camberDeg/levelDeg/pitchDeg functions, so
+  // we negate here at the single capture point to match the Euler convention BEFORE the value
+  // reaches state.gravity (raw path) and state.smoothedGravity (display path). Without this,
+  // on-device readings are inverted (camber ~180deg, pitch/level sign-flipped) whenever motion
+  // permission is granted, while the Euler fallback stays self-consistent. magnitude/pose
+  // checks below use hypot/abs and are sign-robust, so they are unaffected by this negation.
+  // VERIFY ON-DEVICE: flat screen-up should give normalized z = -1, upright portrait +y.
+  state.gravity = { x: -g.x, y: -g.y, z: -g.z };
   state.gravityTime = Date.now();
   // |g| feeds the P0-6 quasi-static motion gate: when the device is moved/pressed, |g|
   // strays from the expected magnitude (~9.81 m/s^2 or ~1g) and the settle is rejected.

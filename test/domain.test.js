@@ -246,6 +246,36 @@ test('inclinationForMode dispatches per mode and defaults to camber', () => {
   assert.equal(inclinationForMode('camber', { x: 0, y: NaN, z: 0 }), null);
 });
 
+test('iOS-negated devicemotion vector agrees with the Euler source after onMotion sign fix', () => {
+  // Stage 7 fix: iOS accelerationIncludingGravity is NEGATED relative to gravityFromEuler's
+  // gravity-DIRECTION convention (flat screen-up reads z ~= +9.81, not -1). onMotion now stores
+  // state.gravity = { x:-g.x, y:-g.y, z:-g.z }; this fixture replays that path so a future
+  // regression (dropping the negation, or a pure-function sign flip) is caught off-device.
+  const poses = [
+    { beta: 0, gamma: 0 },     // flat screen-up
+    { beta: 90, gamma: 0 },    // upright portrait
+    { beta: 10, gamma: 0 },    // nose-up pitch
+    { beta: -10, gamma: 0 },   // nose-down pitch
+    { beta: 0, gamma: 10 },    // right level tilt
+    { beta: 0, gamma: -10 },   // left level tilt
+    { beta: 80, gamma: 5 },    // near-upright camber pose (Euler is weak here, signs must still agree)
+  ];
+  for (const pose of poses) {
+    const euler = gravityFromEuler(pose);
+    // Raw iOS reports the NEGATED vector (specific force, ~9.81 magnitude); onMotion negates it back.
+    const rawIos = { x: -euler.x * 9.81, y: -euler.y * 9.81, z: -euler.z * 9.81 };
+    const normalized = { x: -rawIos.x, y: -rawIos.y, z: -rawIos.z };
+    // Magnitude differs (unit vs ~9.81) but every angle is an atan2 ratio, so it cancels.
+    assert.equal(round2(camberDeg(normalized)), round2(camberDeg(euler)));
+    assert.equal(round2(levelDeg(normalized)), round2(levelDeg(euler)));
+    assert.equal(round2(pitchDeg(normalized)), round2(pitchDeg(euler)));
+  }
+  // The fix is load-bearing: an upright portrait phone normalizes to +y and must read +90 pitch;
+  // the UNFIXED (raw iOS, -y) vector would read -90, proving the negation matters.
+  assert.equal(round2(pitchDeg({ x: 0, y: 9.81, z: 0 })), 90);   // fixed: upright reads +90
+  assert.equal(round2(pitchDeg({ x: 0, y: -9.81, z: 0 })), -90); // unfixed would read inverted -90
+});
+
 test('bufferDrift measures half-to-half trend and ignores short buffers', () => {
   // Too few samples to split into two meaningful halves: no trend to report.
   assert.equal(bufferDrift([]), 0);
