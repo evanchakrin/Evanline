@@ -4,6 +4,8 @@ import {
   captureSeriesStats,
   clampAngle as clampAngleInRange,
   computeSampleQuality,
+  gravityFromEuler,
+  inclinationForMode,
   polarPoint,
   standardDeviation,
 } from './domain.js';
@@ -67,6 +69,9 @@ const BUBBLE_WARN_THRESHOLD_DEG = 3;
 const NEEDLE_GOOD_THRESHOLD_DEG = 1.5;
 const NEEDLE_WARN_THRESHOLD_DEG = 3;
 const SMOOTHING_ALPHA = 0.22;
+// devicemotion gravity is considered fresh enough to be the primary tilt source
+// for this long after its last sample; beyond it we fall back to Euler reconstruction.
+const GRAVITY_FRESH_MS = 400;
 const SAMPLE_WINDOW = 12;
 const MIN_SAMPLE_COUNT = 6;
 const SETTLED_RANGE = 0.18;
@@ -82,6 +87,13 @@ const state = {
   beta: 0,
   gamma: 0,
   smoothed: { alpha: null, beta: null, gamma: null },
+  // Raw accelerometer gravity (device frame) from devicemotion; primary tilt source.
+  // smoothedGravity holds the EMA-smoothed components used before computing the angle.
+  gravity: null,
+  gravityTime: 0,
+  gravityMagnitude: null,
+  gravityFresh: false,
+  smoothedGravity: { x: null, y: null, z: null },
   calibrationOffsets: defaultOffsets(),
   calibrationMeta: defaultCalibrationMeta(),
   deviceProfile: null,
@@ -398,22 +410,40 @@ function orientationLabel(value) {
   return value === 'landscape' ? 'Landscape' : 'Portrait';
 }
 
-function rawAngleForMode(mode = state.mode, source = state.smoothed) {
-  const bank = source || state;
-  const axis = mode === 'pitch' ? 'beta' : 'gamma';
-  const value = bank[axis];
-  const deviceBias = axis === 'beta'
+// Pick the best available gravity vector: fresh smoothed devicemotion gravity (the
+// robust source that bypasses the Euler gimbal-lock/clamp), else reconstruct it from
+// the smoothed orientation Euler angles (weak for camber near beta ~= ±90).
+function gravityForAngle() {
+  const sg = state.smoothedGravity;
+  if (state.gravityFresh && Number.isFinite(sg.x) && Number.isFinite(sg.y) && Number.isFinite(sg.z)) {
+    return { x: sg.x, y: sg.y, z: sg.z };
+  }
+  return gravityFromEuler(state.smoothed);
+}
+
+function rawAngleForMode(mode = state.mode) {
+  const gravity = gravityForAngle();
+  const angle = inclinationForMode(mode, gravity);
+  // The bias subtraction shape from the Euler era is preserved (a later stage fixes it),
+  // but it now applies in the ANGLE domain rather than to a single raw Euler axis.
+  const deviceBias = mode === 'pitch'
     ? (state.deviceProfile?.axisBias?.beta || 0)
     : (state.deviceProfile?.axisBias?.gamma || 0);
-  return Number.isFinite(value) ? value - deviceBias : 0;
+  return Number.isFinite(angle) ? angle - deviceBias : null;
 }
 
 function calibratedAngle(mode = state.mode) {
-  return rawAngleForMode(mode) - (state.calibrationOffsets[mode] || 0);
+  // Subtracts a constant from a physically true (gravity-derived) angle. Returns null
+  // when the underlying gravity-vector angle is unavailable (e.g. toe, or no sensor yet).
+  const raw = rawAngleForMode(mode);
+  return raw === null ? null : raw - (state.calibrationOffsets[mode] || 0);
 }
 
 function sampleAverage() {
-  if (!state.sampleBuffer.length) return calibratedAngle();
+  if (!state.sampleBuffer.length) {
+    const angle = calibratedAngle();
+    return angle === null ? 0 : angle;
+  }
   return average(state.sampleBuffer);
 }
 
@@ -644,19 +674,47 @@ function activeNotice() {
 function attachSensorListener() {
   if (state.sensorListenerAttached) return;
   window.addEventListener('deviceorientation', onOrientation, true);
+  window.addEventListener('devicemotion', onMotion, true);
   state.sensorListenerAttached = true;
 }
 
 function detachSensorListener() {
   if (!state.sensorListenerAttached) return;
   window.removeEventListener('deviceorientation', onOrientation, true);
+  window.removeEventListener('devicemotion', onMotion, true);
   state.sensorListenerAttached = false;
+}
+
+function gravityIsFresh(now = Date.now()) {
+  return !!state.gravity && (now - state.gravityTime) <= GRAVITY_FRESH_MS;
 }
 
 function pauseSensors() {
   // Pausing intentionally both freezes the latest reading and detaches telemetry until Start Measuring is tapped.
   state.locked = true;
   detachSensorListener();
+}
+
+function onMotion(event) {
+  if (state.locked) return;
+  // accelerationIncludingGravity measures the gravity direction directly in the device
+  // frame, bypassing the Euler gimbal-lock singularity and the gamma clamp. This is the
+  // robust primary source for camber (portrait, beta ~= ±90) where Euler angles degrade.
+  const g = event.accelerationIncludingGravity;
+  if (!g || !Number.isFinite(g.x) || !Number.isFinite(g.y) || !Number.isFinite(g.z)) return;
+
+  state.gravity = { x: g.x, y: g.y, z: g.z };
+  state.gravityTime = Date.now();
+  // |g| is exposed for a later-stage motion gate (device is being moved when |g| strays
+  // far from 1g); no gate is applied here.
+  state.gravityMagnitude = Math.hypot(g.x, g.y, g.z);
+
+  // Smooth the gravity COMPONENTS before computing any angle (atan2 must see smoothed input).
+  ['x', 'y', 'z'].forEach(axis => {
+    const next = state.gravity[axis];
+    const prev = state.smoothedGravity[axis];
+    state.smoothedGravity[axis] = prev === null ? next : prev + (next - prev) * SMOOTHING_ALPHA;
+  });
 }
 
 function onOrientation(event) {
@@ -674,13 +732,24 @@ function onOrientation(event) {
 
   state.screenOrientation = currentOrientation();
   state.orientationOk = state.screenOrientation === preferredOrientation();
+  state.gravityFresh = gravityIsFresh();
 
-  pushSample(calibratedAngle());
+  const sample = calibratedAngle();
+  if (sample !== null) pushSample(sample);
   updateSampleQuality();
   scheduleLiveRefresh();
 }
 
+function requestMotionPermission() {
+  // iOS requires a separate motion permission, requested in the same user gesture as the
+  // orientation permission. Failure is non-fatal: rawAngleForMode() falls back to Euler.
+  if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+    DeviceMotionEvent.requestPermission().catch(() => {});
+  }
+}
+
 function requestSensors(callback) {
+  requestMotionPermission();
   if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
     DeviceOrientationEvent.requestPermission()
       .then(response => {
@@ -927,6 +996,11 @@ function calibrate() {
     return;
   }
   const raw = rawAngleForMode();
+  if (raw === null) {
+    setNotice('No gravity-derived angle is available for this mode yet. Hold the phone steady and try again.', 'warn');
+    refreshUI();
+    return;
+  }
   state.calibrationOffsets[state.mode] = raw;
   state.calibrationMeta[state.mode] = {
     offset: raw,

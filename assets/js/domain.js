@@ -6,6 +6,53 @@ export function degToRad(value) {
   return value * Math.PI / 180;
 }
 
+// Reconstruct the gravity direction in the device frame from W3C DeviceOrientation
+// Euler angles (intrinsic Z-X'-Y''). FALLBACK source only: near beta ~= ±90 the
+// camber signal lives in components scaled by cos(beta) ~= 0, so this is adequate
+// for level/pitch but weak for camber. Prefer raw accelerometer gravity when available.
+export function gravityFromEuler({ beta, gamma } = {}) {
+  if (!Number.isFinite(beta) || !Number.isFinite(gamma)) return null;
+  const b = degToRad(beta);
+  const g = degToRad(gamma);
+  return {
+    x: -Math.cos(b) * Math.sin(g),
+    y: Math.sin(b),
+    z: -Math.cos(b) * Math.cos(g),
+  };
+}
+
+function finiteGravity(g) {
+  return g && Number.isFinite(g.x) && Number.isFinite(g.y) && Number.isFinite(g.z);
+}
+
+// Camber: phone held upright (portrait) flush against a vertical wheel face.
+export function camberDeg(g) {
+  if (!finiteGravity(g)) return null;
+  return Math.atan2(g.x, g.y) * 180 / Math.PI;
+}
+
+// Level: phone flat in landscape, left/right tilt across the device width.
+export function levelDeg(g) {
+  if (!finiteGravity(g)) return null;
+  return Math.atan2(g.x, Math.hypot(g.y, g.z)) * 180 / Math.PI;
+}
+
+// Pitch: phone flat in landscape, front/back tilt along the device length.
+export function pitchDeg(g) {
+  if (!finiteGravity(g)) return null;
+  return Math.atan2(g.y, Math.hypot(g.x, g.z)) * 180 / Math.PI;
+}
+
+// Map a measurement mode onto its gravity-vector inclination. Toe is handled in a
+// later stage so it returns null here. Returns null when gravity is missing/non-finite.
+export function inclinationForMode(mode, g) {
+  if (!finiteGravity(g)) return null;
+  if (mode === 'level') return levelDeg(g);
+  if (mode === 'pitch') return pitchDeg(g);
+  if (mode === 'toe') return null;
+  return camberDeg(g);
+}
+
 export function clampAngle(value, range) {
   return clamp(value, -range, range);
 }

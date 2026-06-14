@@ -4,10 +4,15 @@ import assert from 'node:assert/strict';
 import {
   average,
   buildArcPath,
+  camberDeg,
   captureSeriesStats,
   clamp,
   clampAngle,
   computeSampleQuality,
+  gravityFromEuler,
+  inclinationForMode,
+  levelDeg,
+  pitchDeg,
   polarPoint,
   standardDeviation,
 } from '../assets/js/domain.js';
@@ -117,4 +122,82 @@ test('captureSeriesStats returns null for empty input and aggregates otherwise',
   assert.equal(stats.range, 2);
   assert.equal(stats.latest.value, 2);
   assert.ok(stats.stdDev > 0);
+});
+
+// Add 0 to collapse -0 into 0 so strict equality against 0 holds.
+const round2 = value => Number(value.toFixed(2)) + 0;
+
+test('gravityFromEuler reconstructs the device-frame gravity direction', () => {
+  // Flat phone (beta=0, gamma=0): gravity points straight out the back of the screen.
+  const flat = gravityFromEuler({ beta: 0, gamma: 0 });
+  assert.equal(round2(flat.x), 0);
+  assert.equal(round2(flat.y), 0);
+  assert.equal(round2(flat.z), -1);
+
+  // Phone upright in portrait (beta=90): gravity now along +y.
+  const upright = gravityFromEuler({ beta: 90, gamma: 0 });
+  assert.equal(round2(upright.x), 0);
+  assert.equal(round2(upright.y), 1);
+  assert.equal(round2(upright.z), 0);
+
+  // A 10deg roll (gamma) tips gravity into -x.
+  const rolled = gravityFromEuler({ beta: 0, gamma: 10 });
+  assert.ok(rolled.x < 0);
+  assert.equal(round2(rolled.x), round2(-Math.sin(10 * Math.PI / 180)));
+
+  assert.equal(gravityFromEuler({ beta: NaN, gamma: 0 }), null);
+  assert.equal(gravityFromEuler({}), null);
+});
+
+test('levelDeg is zero when flat and signed for left/right tilt', () => {
+  assert.equal(round2(levelDeg({ x: 0, y: 0, z: -1 })), 0);
+  // Tilt right by 10deg about the device long axis: gravity gains -x.
+  const right = gravityFromEuler({ beta: 0, gamma: 10 });
+  assert.equal(round2(levelDeg(right)), -10);
+  const left = gravityFromEuler({ beta: 0, gamma: -10 });
+  assert.equal(round2(levelDeg(left)), 10);
+  assert.equal(levelDeg({ x: 0, y: NaN, z: -1 }), null);
+});
+
+test('pitchDeg is zero when flat and signed for front/back tilt', () => {
+  assert.equal(round2(pitchDeg({ x: 0, y: 0, z: -1 })), 0);
+  // Nose up/down maps to beta; a 10deg beta tilt yields a 10deg pitch with sign.
+  const up = gravityFromEuler({ beta: 10, gamma: 0 });
+  assert.equal(round2(pitchDeg(up)), 10);
+  const down = gravityFromEuler({ beta: -10, gamma: 0 });
+  assert.equal(round2(pitchDeg(down)), -10);
+  assert.equal(pitchDeg(null), null);
+});
+
+test('camberDeg reads tilt away from vertical for an upright phone', () => {
+  // Perfectly upright portrait phone (gravity along +y) reads zero camber.
+  assert.equal(round2(camberDeg({ x: 0, y: 1, z: 0 })), 0);
+  // Upright phone leaned 10deg so gravity tips into +x => positive camber.
+  const positive = camberDeg({
+    x: Math.sin(10 * Math.PI / 180),
+    y: Math.cos(10 * Math.PI / 180),
+    z: 0,
+  });
+  assert.equal(round2(positive), 10);
+  const negative = camberDeg({
+    x: -Math.sin(10 * Math.PI / 180),
+    y: Math.cos(10 * Math.PI / 180),
+    z: 0,
+  });
+  assert.equal(round2(negative), -10);
+  assert.equal(camberDeg(undefined), null);
+});
+
+test('inclinationForMode dispatches per mode and defaults to camber', () => {
+  const tilted = { x: Math.sin(10 * Math.PI / 180), y: Math.cos(10 * Math.PI / 180), z: 0 };
+  assert.equal(round2(inclinationForMode('camber', tilted)), 10);
+  assert.equal(round2(inclinationForMode('level', gravityFromEuler({ beta: 0, gamma: 10 }))), -10);
+  assert.equal(round2(inclinationForMode('pitch', gravityFromEuler({ beta: 10, gamma: 0 }))), 10);
+  // Toe is handled in a later stage, so it returns null here.
+  assert.equal(inclinationForMode('toe', tilted), null);
+  // Unknown modes fall back to camber.
+  assert.equal(round2(inclinationForMode('unknown', tilted)), 10);
+  // Missing/non-finite gravity yields null regardless of mode.
+  assert.equal(inclinationForMode('level', null), null);
+  assert.equal(inclinationForMode('camber', { x: 0, y: NaN, z: 0 }), null);
 });
