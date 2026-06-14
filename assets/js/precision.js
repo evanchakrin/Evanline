@@ -32,6 +32,68 @@ export const PRECISION_CONSTANTS = {
   APPROXIMATE_RANGE: 0.3,
 };
 
+// P1-1: smallest offset difference that counts as a re-zero between forward and reverse sets.
+// Captures taken with the same active zero will share an identical (already-rounded) offset, so
+// anything past floating-point noise means the operator re-zeroed mid-flip and the (F-R)/2
+// cancellation can no longer be trusted.
+export const OFFSET_CONFLICT_TOLERANCE = 1e-6;
+
+// P1-1: mean of the RAW (pre-calibration) capture values. Reversal cancellation must operate on
+// readings BEFORE the per-mode zero so a re-zero between flips cannot leak half its error into
+// (F_raw - R_raw)/2. Falls back to the display value for legacy snapshots saved before rawValue
+// existed (those predate the reversal fix and simply behave as the old shared-offset path).
+function rawSeriesMean(series = []) {
+  if (!series.length) return null;
+  const values = series.map(entry => (Number.isFinite(entry.rawValue) ? entry.rawValue : entry.value));
+  return average(values);
+}
+
+// P1-1: the per-mode calibration offset that was active when these captures were taken. Returns
+// null when a series mixes offsets (operator re-zeroed mid-set) or when no offset was recorded.
+function seriesOffset(series = []) {
+  const offsets = series
+    .map(entry => (Number.isFinite(entry.offsetUsed) ? entry.offsetUsed : null))
+    .filter(value => value !== null);
+  if (!offsets.length) return null;
+  const first = offsets[0];
+  return offsets.every(value => Math.abs(value - first) <= OFFSET_CONFLICT_TOLERANCE) ? first : null;
+}
+
+// P1-1: raw-based reversal cancellation. Both the corrected value and the bias are derived from
+// the RAW capture means so the shared per-mode zero provably cancels: corrected = (F_raw-R_raw)/2,
+// bias = (F_raw+R_raw)/2. `offsetConflict` is true when forward and reverse were captured with
+// different per-mode zeros (a re-zero between flips), which invalidates the cancellation.
+export function reversalFromCaptures(bucket = { forward: [], reverse: [] }) {
+  const forward = Array.isArray(bucket.forward) ? bucket.forward : [];
+  const reverse = Array.isArray(bucket.reverse) ? bucket.reverse : [];
+  const forwardRawMean = rawSeriesMean(forward);
+  const reverseRawMean = rawSeriesMean(reverse);
+  const forwardOffset = seriesOffset(forward);
+  const reverseOffset = seriesOffset(reverse);
+  // Display-only zeroed forward value (used when there is no reverse set to cancel against).
+  const forwardZeroed = forwardRawMean === null
+    ? null
+    : forwardRawMean - (forwardOffset || 0);
+  const hasBoth = forwardRawMean !== null && reverseRawMean !== null;
+  const reversalBias = hasBoth ? (forwardRawMean + reverseRawMean) / 2 : null;
+  const reversalCorrectedValue = hasBoth ? (forwardRawMean - reverseRawMean) / 2 : forwardZeroed;
+  // A re-zero between forward and reverse leaks half the zero error into the difference; flag it.
+  const offsetConflict = hasBoth
+    && forwardOffset !== null
+    && reverseOffset !== null
+    && Math.abs(forwardOffset - reverseOffset) > OFFSET_CONFLICT_TOLERANCE;
+  return {
+    forwardRawMean,
+    reverseRawMean,
+    forwardZeroed,
+    forwardOffset,
+    reverseOffset,
+    reversalBias,
+    reversalCorrectedValue,
+    offsetConflict,
+  };
+}
+
 // P1-5: standard error of the mean for a capture series. sigma/sqrt(n), with the +/- 95%
 // half-width (k ~= 2) the UI can surface next to a verdict. Returns null without enough data.
 export function captureStandardError(stats, k = 2) {
@@ -87,11 +149,27 @@ export function baselineSummary(baselinePoints = {}, sides = SIDES, constants = 
   };
 }
 
+// P1-2: the baseline plane is built from LEVEL-mode floor readings (phone flat, world Z up).
+// Compensation is only dimensionally valid when the measured mode shares that world reference.
+//   - level  : same orientation/axis as the baseline -> subtract the side's deviation from the plane.
+//   - pitch  : front/rear floor slope IS the pitch datum -> subtract the front/rear baseline deviation.
+//   - camber : the phone is upright (different world axis), so subtracting a level-plane height is
+//              dimensionally wrong. Return 0 until a proper 3D plane projection exists.
+//              TODO(stage-6): the plane fit (roadmap P? stage 6) projects the level baseline normal
+//              onto the camber measurement axis; that projection is the correct camber correction.
+//   - toe    : not derived from the floor plane -> excluded.
 export function baselineCompensationForSide(side, mode, summary) {
   if (!summary || !summary.complete) return 0;
-  if (mode === 'camber' || mode === 'level') {
+  if (mode === 'level') {
     const stats = summary.sideStats[side];
     return stats ? stats.mean - summary.overallMean : 0;
+  }
+  if (mode === 'pitch') {
+    // Pitch is a front-vs-rear slope; compensate by how far this side's front/rear pair
+    // deviates from the overall plane mean (front sides share frontAvg, rears share rearAvg).
+    const isFront = side === 'FL' || side === 'FR';
+    const pairAvg = isFront ? summary.frontAvg : summary.rearAvg;
+    return pairAvg !== null ? pairAvg - summary.overallMean : 0;
   }
   return 0;
 }
@@ -112,11 +190,17 @@ export function precisionSummary({ mode, side, captures = {}, baseline, fixture 
   // P1-5: trust the spread of the forward set via a proper standard error (sigma/sqrt(n)).
   const standardError = captureStandardError(forward);
   const captureCount = (forward?.count || 0) + (reverse?.count || 0);
-  const forwardOnlyValue = forward ? forward.mean : null;
-  // Reversing the fixture should flip the true angle sign while leaving placement bias behind.
-  // Averaging forward + reverse exposes that bias, while subtracting reverse from forward cancels the shared bias back out.
-  const reversalBias = forward && reverse ? (forward.mean + reverse.mean) / 2 : null;
-  const reversalCorrectedValue = forward && reverse ? (forward.mean - reverse.mean) / 2 : forwardOnlyValue;
+  // P1-1: reversal cancellation runs on RAW (pre-calibration) capture means so a re-zero between
+  // forward and reverse cannot leak half the zero error into (F_raw - R_raw)/2. Reversing the
+  // fixture flips the true angle sign while leaving placement bias behind: averaging forward +
+  // reverse exposes that bias, subtracting cancels the shared zero AND the bias back out.
+  const reversal = reversalFromCaptures(bucket);
+  const forwardOnlyValue = reversal.forwardZeroed;
+  const reversalBias = reversal.reversalBias;
+  const reversalCorrectedValue = reversal.reversalCorrectedValue;
+  // P1-1: a re-zero between the forward and reverse sets invalidates the cancellation; "do not
+  // re-zero between forward and reverse" is enforced by blocking the save below.
+  const offsetConflict = reversal.offsetConflict;
   const baselineComp = Number.isFinite(reversalCorrectedValue) ? baselineCompensationForSide(side, mode, baseline) : 0;
   const finalValue = Number.isFinite(reversalCorrectedValue) ? reversalCorrectedValue - baselineComp : null;
   const rangePenalty = (forward?.range || 0) + (reverse?.range || 0);
@@ -136,7 +220,11 @@ export function precisionSummary({ mode, side, captures = {}, baseline, fixture 
   );
 
   let verdict = 'Need more captures';
-  if (forwardReady && enoughForVerdict && (!needsReverse || reverseReady)) {
+  // P1-1: a re-zero between forward and reverse breaks the reversal cancellation, so the set
+  // cannot be trusted regardless of repeatability — surface it as its own verdict and block save.
+  if (offsetConflict) {
+    verdict = 'Re-zeroed between flips';
+  } else if (forwardReady && enoughForVerdict && (!needsReverse || reverseReady)) {
     if (repeatabilityScore >= constants.ADJUSTMENT_QUALITY_THRESHOLD
         && baseline?.label === 'Trusted'
         && (!needsReverse || Math.abs(reversalBias || 0) <= constants.MAX_ACCEPTABLE_REVERSAL_BIAS)) {
@@ -156,10 +244,11 @@ export function precisionSummary({ mode, side, captures = {}, baseline, fixture 
     reversalCorrectedValue,
     finalValue,
     reversalBias,
+    offsetConflict,
     baselineCompensation: baselineComp,
     baseline,
     needsReverse,
-    readyToSave: forwardReady && enoughForVerdict && (!needsReverse || reverseReady),
+    readyToSave: forwardReady && enoughForVerdict && (!needsReverse || reverseReady) && !offsetConflict,
     repeatabilityScore,
     standardError: standardError ? standardError.standardError : null,
     toleranceDeg: standardError ? standardError.toleranceDeg : null,

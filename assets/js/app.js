@@ -402,8 +402,19 @@ function ensurePrecisionBucket(mode = state.mode, side = state.selectedSide) {
 }
 
 function buildCaptureSnapshot() {
+  // P1-1: record the RAW (pre-calibration) angle and the per-mode offset that was active so the
+  // reversal step can cancel the shared zero in (F_raw - R_raw)/2 even if the operator re-zeros
+  // between forward and reverse. `value` stays the display-only zeroed reading. rawAngle is the
+  // un-offset gravity angle; it falls back to value+offset when no live angle is available (e.g.
+  // toe), so rawValue - offsetUsed always reconstructs the displayed value.
+  const value = Number(sampleAverage().toFixed(3));
+  const offsetUsed = effectiveOffset(state.mode);
+  const rawAngle = rawAngleForMode(state.mode);
+  const rawValue = Number((rawAngle === null ? value + offsetUsed : rawAngle).toFixed(3));
   return {
-    value: Number(sampleAverage().toFixed(3)),
+    value,
+    rawValue,
+    offsetUsed: Number(offsetUsed.toFixed(3)),
     confidence: state.confidence,
     samples: state.sampleBuffer.length,
     range: Number(sampleRange().toFixed(3)),
@@ -707,6 +718,10 @@ function loadState() {
         .filter(entry => Number.isFinite(entry?.value))
         .map(entry => ({
           value: Number(entry.value),
+          // P1-1: tolerate legacy captures saved before raw-based reversal existed. When rawValue
+          // is absent, leave it null so reversalFromCaptures falls back to the display value.
+          rawValue: Number.isFinite(entry.rawValue) ? Number(entry.rawValue) : null,
+          offsetUsed: Number.isFinite(entry.offsetUsed) ? Number(entry.offsetUsed) : null,
           confidence: Number.isFinite(entry.confidence) ? entry.confidence : 0,
           samples: Number.isFinite(entry.samples) ? entry.samples : 0,
           range: Number.isFinite(entry.range) ? entry.range : 0,
@@ -1305,6 +1320,8 @@ function performGuideAction() {
 }
 
 function precisionSaveReason(summary = precisionSummary(state.mode, state.selectedSide)) {
+  // P1-1: a re-zero between flips takes priority — it blocks the save no matter the counts.
+  if (summary.offsetConflict) return 'Forward and reversed sets used different zeros — re-capture one set without re-zeroing.';
   if (!Number.isFinite(summary.finalValue)) return 'Capture repeated readings before saving.';
   if (!summary.forward || summary.forward.count < PRECISION_CONSTANTS.MIN_PRECISION_CAPTURES_READY) {
     // P1-5: state how many captures are still needed against the displayed forward target.
@@ -1430,6 +1447,12 @@ function saveQuickMeasurement() {
 
 function savePrecisionMeasurement() {
   const summary = precisionSummary(state.mode, state.selectedSide);
+  // P1-1: a re-zero between forward and reverse breaks the (F-R)/2 cancellation — refuse to save.
+  if (summary.offsetConflict) {
+    setNotice('Forward and reversed captures used different zeros. Do not re-zero between flips — re-capture one set so they share a zero.', 'warn');
+    refreshUI();
+    return;
+  }
   if (!summary.readyToSave || !Number.isFinite(summary.finalValue)) {
     setNotice('Precision save needs repeated settled captures and, for reversible fixtures, both forward and reversed sets.', 'warn');
     refreshUI();
@@ -1766,9 +1789,12 @@ function refreshPrecisionCard() {
     ? `Forward σ ${formatNumber(summary.forward.stdDev)}°${summary.reverse ? ` • Reverse σ ${formatNumber(summary.reverse.stdDev)}°` : ''}`
     : 'Settled spread and repeated agreement drive this score.';
   el('precision-bias-value').textContent = summary.reversalBias === null ? 'Pending' : formatSigned(summary.reversalBias);
-  el('precision-bias-sub').textContent = summary.reversalBias === null
-    ? 'Capture a reversed set to estimate mounting bias.'
-    : `Baseline compensation ${formatSigned(summary.baselineCompensation)}`;
+  // P1-1: flag a re-zero between flips here since it lives on the forward/reverse relationship.
+  el('precision-bias-sub').textContent = summary.offsetConflict
+    ? 'Forward and reversed used different zeros — re-capture without re-zeroing.'
+    : (summary.reversalBias === null
+        ? 'Capture a reversed set to estimate mounting bias.'
+        : `Baseline compensation ${formatSigned(summary.baselineCompensation)}`);
   el('precision-baseline-plane').textContent = baseline.complete
     ? `${formatSigned(baseline.leftRightDelta || 0)} L-R`
     : `${baseline.completedSides}/4 ready`;
