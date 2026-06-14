@@ -105,6 +105,163 @@ export function calibrationZeroValid(mode, calibrationMeta, currentOrientation =
   return true;
 }
 
+// P2-1: two-point SCALE calibration. A per-mode zero corrects an additive offset, but a sensor
+// can also under/over-report by a multiplicative factor (e.g. reads 9.0° on a true 10.0° wedge).
+// After zeroing, hold the phone on a KNOWN reference angle and capture its measured (post-zero)
+// value; gain = trueAngle / measuredAngle is the linear scale that maps measured onto true.
+// Returns null (no scale) when either input is non-finite, the measured value is ~0 (division
+// would blow up / be meaningless near zero), or the resulting gain is implausible — so a bad
+// capture degrades gracefully to the default unity gain rather than corrupting every reading.
+export function scaleGainFromReference(trueAngle, measuredAngle, { minMeasured = 0.5, maxGain = 5 } = {}) {
+  if (!Number.isFinite(trueAngle) || !Number.isFinite(measuredAngle)) return null;
+  if (Math.abs(measuredAngle) < minMeasured) return null;
+  const gain = trueAngle / measuredAngle;
+  if (!Number.isFinite(gain) || gain <= 0 || gain > maxGain || gain < 1 / maxGain) return null;
+  return gain;
+}
+
+// P2-1: apply the full per-mode calibration: subtract the additive zero, then multiply by the
+// stored gain. calibrated = (raw - offset) * gain. Gain defaults to 1 (no-op) when not set, so
+// modes without a scale capture behave exactly as before. Returns null when raw is null (no
+// gravity-derived reading) so the "no reading" pipeline is preserved.
+export function applyScaleCalibration(rawAngle, offset = 0, gain = 1) {
+  if (!Number.isFinite(rawAngle)) return null;
+  const offsetValue = Number.isFinite(offset) ? offset : 0;
+  const gainValue = Number.isFinite(gain) && gain > 0 ? gain : 1;
+  return (rawAngle - offsetValue) * gainValue;
+}
+
+// P2-5: pure normalization of one persisted capture snapshot. Extracted from loadState so the
+// tolerant-coercion rules (legacy data missing rawValue/offsetUsed/gainUsed/context stamps stays
+// loadable and behaves as the older shared-offset, unity-gain path) are unit-testable in
+// isolation. `nowIso` is injected so the default-time fallback is deterministic.
+export function normalizeCaptureSnapshot(entry = {}, nowIso = new Date().toISOString()) {
+  return {
+    value: Number(entry.value),
+    // P1-1: null rawValue makes reversalFromCaptures fall back to the display value (legacy path).
+    rawValue: Number.isFinite(entry.rawValue) ? Number(entry.rawValue) : null,
+    offsetUsed: Number.isFinite(entry.offsetUsed) ? Number(entry.offsetUsed) : null,
+    // P2-1: legacy captures had no gain -> treat as unity.
+    gainUsed: Number.isFinite(entry.gainUsed) && entry.gainUsed > 0 ? Number(entry.gainUsed) : 1,
+    confidence: Number.isFinite(entry.confidence) ? entry.confidence : 0,
+    samples: Number.isFinite(entry.samples) ? entry.samples : 0,
+    range: Number.isFinite(entry.range) ? entry.range : 0,
+    stdDev: Number.isFinite(entry.stdDev) ? entry.stdDev : 0,
+    // P1-4 / P2-3: optional +/- band stamp.
+    toleranceDeg: Number.isFinite(entry.toleranceDeg) ? Number(entry.toleranceDeg) : null,
+    orientation: entry.orientation === 'landscape' ? 'landscape' : 'portrait',
+    // P2-3: physical/calibration context stamps. Absent on legacy data -> null/'' so a delta across
+    // mismatched contexts can be detected without breaking old sessions.
+    pose: entry.pose === 'landscape' || entry.pose === 'portrait' ? entry.pose : null,
+    deviceRefTime: typeof entry.deviceRefTime === 'string' ? entry.deviceRefTime : null,
+    fixtureId: typeof entry.fixtureId === 'string' ? entry.fixtureId : '',
+    time: typeof entry.time === 'string' ? entry.time : nowIso,
+  };
+}
+
+// P2-5: pure normalization of one persisted baseline point (no reversal context, so it carries
+// only the display value and quality fields). Kept separate from capture snapshots because
+// baselines never go through reversal.
+export function normalizeBaselinePoint(item = {}, nowIso = new Date().toISOString()) {
+  return {
+    value: Number(item.value),
+    confidence: Number.isFinite(item.confidence) ? item.confidence : 0,
+    samples: Number.isFinite(item.samples) ? item.samples : 0,
+    range: Number.isFinite(item.range) ? item.range : 0,
+    stdDev: Number.isFinite(item.stdDev) ? item.stdDev : 0,
+    orientation: item.orientation === 'landscape' ? 'landscape' : 'portrait',
+    time: typeof item.time === 'string' ? item.time : nowIso,
+  };
+}
+
+// P2-5: pure normalization/migration of one persisted per-mode calibration entry. Returns null
+// for an entry with no finite offset (treated as "not zeroed"), and tolerantly carries the
+// optional P2-1 scale gain forward when present. This is the v2->v3 forward-compatible shape: old
+// data that only had {offset, time, orientation} loads unchanged with unity gain.
+export function normalizeCalibrationMeta(item) {
+  if (!item || !Number.isFinite(item.offset) || typeof item.time !== 'string') return null;
+  const meta = {
+    offset: item.offset,
+    time: item.time,
+    orientation: item.orientation === 'landscape' ? 'landscape' : 'portrait',
+  };
+  if (Number.isFinite(item.gain) && item.gain > 0) {
+    meta.gain = Number(item.gain);
+    if (Number.isFinite(item.gainReference)) meta.gainReference = Number(item.gainReference);
+    if (typeof item.gainTime === 'string') meta.gainTime = item.gainTime;
+  }
+  return meta;
+}
+
+// P2-5: pure normalization of one persisted saved measurement, including the P2-3 context stamps
+// and the bounded save history. Extracted from loadState so the tolerant coercion is testable and
+// so old data (no stamps, no history) loads unchanged. `nowIso` is injected for determinism.
+// `maxHistory` bounds how many prior values are retained per mode+side.
+export function normalizeMeasurement(item = {}, nowIso = new Date().toISOString(), maxHistory = 4) {
+  const history = Array.isArray(item.history)
+    ? item.history
+        .filter(entry => entry && Number.isFinite(entry.value))
+        .slice(-maxHistory)
+        .map(entry => ({
+          value: Number(entry.value),
+          time: typeof entry.time === 'string' ? entry.time : nowIso,
+          confidence: Number.isFinite(entry.confidence) ? entry.confidence : 0,
+          toleranceDeg: Number.isFinite(entry.toleranceDeg) ? Number(entry.toleranceDeg) : null,
+          workflow: entry.workflow === 'precision' ? 'precision' : 'quick',
+        }))
+    : [];
+  return {
+    id: `${item.mode}-${item.side}`,
+    mode: item.mode,
+    side: item.side,
+    value: Number(item.value),
+    confidence: Number.isFinite(item.confidence) ? item.confidence : 0,
+    // P1-4: tolerate older readings saved before the +/- band existed.
+    toleranceDeg: Number.isFinite(item.toleranceDeg) ? Number(item.toleranceDeg) : null,
+    samples: Number.isFinite(item.samples) ? item.samples : 0,
+    time: typeof item.time === 'string' ? item.time : nowIso,
+    workflow: item.workflow === 'precision' ? 'precision' : 'quick',
+    rawValue: Number.isFinite(item.rawValue) ? Number(item.rawValue) : null,
+    correctedValue: Number.isFinite(item.correctedValue) ? Number(item.correctedValue) : null,
+    reversalBias: Number.isFinite(item.reversalBias) ? Number(item.reversalBias) : null,
+    repeatabilityScore: Number.isFinite(item.repeatabilityScore) ? item.repeatabilityScore : null,
+    captureCount: Number.isFinite(item.captureCount) ? item.captureCount : null,
+    baselineQuality: typeof item.baselineQuality === 'string' ? item.baselineQuality : null,
+    trustVerdict: typeof item.trustVerdict === 'string' ? item.trustVerdict : null,
+    fixtureId: typeof item.fixtureId === 'string' ? item.fixtureId : '',
+    // P2-3: calibration/orientation context stamps for the delta-mismatch guard. Absent on legacy
+    // data -> null/'' so old readings still load and compare as "unknown context" (non-blocking).
+    offsetUsed: Number.isFinite(item.offsetUsed) ? Number(item.offsetUsed) : null,
+    gainUsed: Number.isFinite(item.gainUsed) && item.gainUsed > 0 ? Number(item.gainUsed) : null,
+    orientation: item.orientation === 'landscape' || item.orientation === 'portrait' ? item.orientation : null,
+    pose: item.pose === 'landscape' || item.pose === 'portrait' ? item.pose : null,
+    deviceRefTime: typeof item.deviceRefTime === 'string' ? item.deviceRefTime : null,
+    history,
+  };
+}
+
+// P2-3: should a left-right / front-rear delta be trusted across two saved readings? A delta is
+// only meaningful when both readings were captured under the SAME calibration/orientation context:
+// the same active offset, the same gain, the same pose/orientation, the same device reference, and
+// the same fixture. Mismatched context means the two numbers are not directly comparable, so the
+// UI should warn rather than silently subtract. Returns { ok, reasons[] }. Missing (null/undefined)
+// stamps on one side are treated as "unknown" and do NOT by themselves trip a mismatch (legacy
+// readings) — only two present-but-different values do.
+export function deltaContextMatch(a, b) {
+  if (!a || !b) return { ok: true, reasons: [] };
+  const reasons = [];
+  const bothFinite = (x, y) => Number.isFinite(x) && Number.isFinite(y);
+  const bothString = (x, y) => typeof x === 'string' && typeof y === 'string';
+  if (bothFinite(a.offsetUsed, b.offsetUsed) && Math.abs(a.offsetUsed - b.offsetUsed) > 1e-3) reasons.push('zero offset');
+  if (bothFinite(a.gainUsed, b.gainUsed) && Math.abs(a.gainUsed - b.gainUsed) > 1e-3) reasons.push('scale gain');
+  const poseA = a.pose || a.orientation;
+  const poseB = b.pose || b.orientation;
+  if (bothString(poseA, poseB) && poseA !== poseB) reasons.push('orientation/pose');
+  if (bothString(a.deviceRefTime, b.deviceRefTime) && a.deviceRefTime !== b.deviceRefTime) reasons.push('device reference');
+  if (bothString(a.fixtureId, b.fixtureId) && a.fixtureId && b.fixtureId && a.fixtureId !== b.fixtureId) reasons.push('fixture');
+  return { ok: reasons.length === 0, reasons };
+}
+
 export function clampAngle(value, range) {
   return clamp(value, -range, range);
 }
@@ -304,4 +461,123 @@ export function flipSelfTest(firstReading, secondReading, tolerance = 0.2) {
     passed: Math.abs(residualBias) <= tolerance,
     tolerance,
   };
+}
+
+// P2-2: canonical planar (x, y) positions of the four corners in a unit square centred on the
+// origin. x grows to the right (L -> R), y grows to the front (R -> F). Used to fit a plane to
+// the four Level-mode corner heights so the baseline is a real least-squares plane, not a pair
+// of naive two-reading deltas. The actual track/wheelbase scale cancels out of the fit's slope
+// SIGN and the per-corner residuals, which is all the compensation needs.
+export const CORNER_POSITIONS = {
+  FL: { x: -1, y: 1 },
+  FR: { x: 1, y: 1 },
+  RL: { x: -1, y: -1 },
+  RR: { x: 1, y: -1 },
+};
+
+// P2-2: least-squares fit of a plane z = a*x + b*y + c to a set of corner samples. Each sample
+// is { x, y, z }. `a` is the left->right slope, `b` the rear->front slope, `c` the mean height.
+// `residuals` keep z_measured - z_fit per corner so a non-coplanar / bad datum stands out, and
+// `maxResidual` / `coplanar` summarise whether the four points actually lie on one plane within
+// `tolerance`. With exactly the four unit-square corners the normal equations are diagonal, so
+// the fit is exact and stable without a matrix library. Returns null when fewer than 3 finite
+// points are supplied (a plane is undetermined). `points` may be an array or a {side: z} map.
+export function fitPlane(points, { tolerance = 0.08 } = {}) {
+  const samples = Array.isArray(points)
+    ? points
+    : Object.entries(points || {}).map(([side, z]) => ({ ...(CORNER_POSITIONS[side] || {}), z, side }));
+  const finite = samples.filter(p => p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z));
+  if (finite.length < 3) return null;
+
+  const n = finite.length;
+  let sx = 0, sy = 0, sz = 0, sxx = 0, syy = 0, sxy = 0, sxz = 0, syz = 0;
+  for (const p of finite) {
+    sx += p.x; sy += p.y; sz += p.z;
+    sxx += p.x * p.x; syy += p.y * p.y; sxy += p.x * p.y;
+    sxz += p.x * p.z; syz += p.y * p.z;
+  }
+  // Solve the 3x3 normal equations [[sxx,sxy,sx],[sxy,syy,sy],[sx,sy,n]] [a,b,c]^T = [sxz,syz,sz]^T
+  // via Cramer's rule. det != 0 whenever the (x, y) positions are not collinear (true for the
+  // four corners and any 3 of them).
+  const det =
+    sxx * (syy * n - sy * sy)
+    - sxy * (sxy * n - sy * sx)
+    + sx * (sxy * sy - syy * sx);
+  if (!Number.isFinite(det) || Math.abs(det) < 1e-12) return null;
+  const detA =
+    sxz * (syy * n - sy * sy)
+    - sxy * (syz * n - sy * sz)
+    + sx * (syz * sy - syy * sz);
+  const detB =
+    sxx * (syz * n - sy * sz)
+    - sxz * (sxy * n - sy * sx)
+    + sx * (sxy * sz - syz * sx);
+  const detC =
+    sxx * (syy * sz - sy * syz)
+    - sxy * (sxy * sz - sx * syz)
+    + sxz * (sxy * sy - syy * sx);
+  const a = detA / det;
+  const b = detB / det;
+  const c = detC / det;
+
+  const residuals = {};
+  let maxResidual = 0;
+  for (const p of finite) {
+    const fit = a * p.x + b * p.y + c;
+    const residual = p.z - fit;
+    if (p.side) residuals[p.side] = residual;
+    maxResidual = Math.max(maxResidual, Math.abs(residual));
+  }
+  return {
+    a,
+    b,
+    c,
+    residuals,
+    maxResidual,
+    coplanar: maxResidual <= tolerance,
+    pointCount: n,
+  };
+}
+
+// P2-2: per-corner plane height for a side from a fitted plane. This is the dimensionally-correct
+// baseline compensation for level (subtract the plane height at this corner so a tilted floor does
+// not contaminate the reading). Returns 0 when the plane or the corner position is unavailable.
+export function planeHeightForSide(side, plane) {
+  if (!plane || !Number.isFinite(plane.a) || !Number.isFinite(plane.b) || !Number.isFinite(plane.c)) return 0;
+  const pos = CORNER_POSITIONS[side];
+  if (!pos) return 0;
+  return plane.a * pos.x + plane.b * pos.y + plane.c;
+}
+
+// P2-4: decide whether a yaw/heading reference can be trusted. iOS Safari exposes an absolute
+// compass heading via webkitCompassHeading (+ webkitCompassAccuracy in degrees), while the W3C
+// `absolute` flag tells us if alpha is earth-referenced at all. Indoors, magnetic distortion
+// makes the heading unreliable (accuracy degrades or the heading is merely relative), so toe /
+// squareness features must NOT treat raw alpha as a yaw reference. Returns a structured verdict:
+//   trusted   : true only when we have an absolute heading with acceptable accuracy.
+//   heading   : the usable compass heading (deg) or null.
+//   reason    : short machine-friendly cause when not trusted ('relative' | 'no-heading' |
+//               'poor-accuracy' | 'unavailable').
+// accuracyTol is the worst webkitCompassAccuracy (deg) we still accept; negative accuracy from
+// the platform means "interference / unknown" and is rejected.
+export function headingTrust({
+  absolute = false,
+  webkitCompassHeading = null,
+  webkitCompassAccuracy = null,
+  accuracyTol = 25,
+} = {}) {
+  const hasCompass = Number.isFinite(webkitCompassHeading);
+  if (hasCompass) {
+    // Safari gives a real magnetometer heading. Accuracy < 0 signals interference/unknown.
+    if (Number.isFinite(webkitCompassAccuracy) && (webkitCompassAccuracy < 0 || webkitCompassAccuracy > accuracyTol)) {
+      return { trusted: false, heading: webkitCompassHeading, accuracy: webkitCompassAccuracy, reason: 'poor-accuracy' };
+    }
+    return { trusted: true, heading: webkitCompassHeading, accuracy: Number.isFinite(webkitCompassAccuracy) ? webkitCompassAccuracy : null, reason: null };
+  }
+  if (absolute) {
+    // Earth-referenced alpha but no accuracy estimate: usable as a heading, but flagged as
+    // lower trust so the UI can still warn about indoor magnetic distortion.
+    return { trusted: false, heading: null, accuracy: null, reason: 'no-heading' };
+  }
+  return { trusted: false, heading: null, accuracy: null, reason: 'relative' };
 }

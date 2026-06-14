@@ -1,7 +1,14 @@
 // Pure logic for the precision workflow: baseline summary, per-side compensation,
 // the precision summary, and the guided workflow step. Kept free of DOM, sensor,
 // and storage code so the rules can be unit-tested in isolation.
-import { average, captureSeriesStats, clamp } from './domain.js';
+import {
+  average,
+  captureSeriesStats,
+  clamp,
+  fitPlane,
+  planeHeightForSide,
+  CORNER_POSITIONS,
+} from './domain.js';
 
 export const SIDES = ['FL', 'FR', 'RL', 'RR'];
 
@@ -30,6 +37,9 @@ export const PRECISION_CONSTANTS = {
   TRUSTED_RANGE: 0.16,
   APPROXIMATE_STDDEV: 0.14,
   APPROXIMATE_RANGE: 0.3,
+  // P2-2: per-corner residual (deg) above which the four baseline points are treated as
+  // non-coplanar, flagging a bad/mis-placed datum and downgrading the baseline to Noisy.
+  PLANE_RESIDUAL_TOLERANCE: 0.08,
 };
 
 // P1-1: smallest offset difference that counts as a re-zero between forward and reverse sets.
@@ -59,6 +69,20 @@ function seriesOffset(series = []) {
   return offsets.every(value => Math.abs(value - first) <= OFFSET_CONFLICT_TOLERANCE) ? first : null;
 }
 
+// P2-1: the shared multiplicative scale gain across forward + reverse captures. calibrated =
+// (raw - offset) * gain, and gain is a shared constant, so applying it AFTER the offset
+// cancellation keeps the saved precision value consistent with the live calibrated reading.
+// Defaults to 1 (no scale) for legacy snapshots and whenever captures mix gains.
+function seriesGain(...series) {
+  const gains = series
+    .flat()
+    .map(entry => (Number.isFinite(entry.gainUsed) && entry.gainUsed > 0 ? entry.gainUsed : null))
+    .filter(value => value !== null);
+  if (!gains.length) return 1;
+  const first = gains[0];
+  return gains.every(value => Math.abs(value - first) <= 1e-6) ? first : 1;
+}
+
 // P1-1: raw-based reversal cancellation. Both the corrected value and the bias are derived from
 // the RAW capture means so the shared per-mode zero provably cancels: corrected = (F_raw-R_raw)/2,
 // bias = (F_raw+R_raw)/2. `offsetConflict` is true when forward and reverse were captured with
@@ -70,13 +94,16 @@ export function reversalFromCaptures(bucket = { forward: [], reverse: [] }) {
   const reverseRawMean = rawSeriesMean(reverse);
   const forwardOffset = seriesOffset(forward);
   const reverseOffset = seriesOffset(reverse);
+  // P2-1: the shared scale gain (1 when no scale was set) is applied AFTER the offset cancellation
+  // so the saved precision value matches the live calibrated (raw - offset) * gain reading.
+  const gain = seriesGain(forward, reverse);
   // Display-only zeroed forward value (used when there is no reverse set to cancel against).
   const forwardZeroed = forwardRawMean === null
     ? null
-    : forwardRawMean - (forwardOffset || 0);
+    : (forwardRawMean - (forwardOffset || 0)) * gain;
   const hasBoth = forwardRawMean !== null && reverseRawMean !== null;
-  const reversalBias = hasBoth ? (forwardRawMean + reverseRawMean) / 2 : null;
-  const reversalCorrectedValue = hasBoth ? (forwardRawMean - reverseRawMean) / 2 : forwardZeroed;
+  const reversalBias = hasBoth ? ((forwardRawMean + reverseRawMean) / 2) * gain : null;
+  const reversalCorrectedValue = hasBoth ? ((forwardRawMean - reverseRawMean) / 2) * gain : forwardZeroed;
   // A re-zero between forward and reverse leaks half the zero error into the difference; flag it.
   const offsetConflict = hasBoth
     && forwardOffset !== null
@@ -117,11 +144,25 @@ export function baselineSummary(baselinePoints = {}, sides = SIDES, constants = 
   const rearAvg = sideStats.RL && sideStats.RR ? average([sideStats.RL.mean, sideStats.RR.mean]) : null;
   const worstStdDev = Math.max(0, ...Object.values(sideStats).map(item => item.stdDev));
   const worstRange = Math.max(0, ...Object.values(sideStats).map(item => item.range));
+  // P2-2: fit a least-squares plane z = a*x + b*y + c to whatever corner means we have (>= 3).
+  // `a` is the left->right floor slope, `b` the rear->front slope, and the per-corner residuals
+  // flag a non-coplanar / bad datum so a single mis-placed corner is visible rather than silently
+  // averaged into the deltas. The plane drives the dimensionally-correct compensation below.
+  const planePoints = Object.entries(sideStats).map(([side, stats]) => ({
+    ...CORNER_POSITIONS[side],
+    z: stats.mean,
+    side,
+  }));
+  const plane = fitPlane(planePoints, { tolerance: constants.PLANE_RESIDUAL_TOLERANCE });
   let label = 'Incomplete';
   let tone = 'warn';
 
   if (completedSides === sides.length) {
-    if (worstStdDev <= constants.TRUSTED_STDDEV && worstRange <= constants.TRUSTED_RANGE) {
+    // P2-2: a plane that does not actually fit the four corners (a corner off the plane) is Noisy
+    // regardless of per-corner repeatability, since the baseline plane is no longer trustworthy.
+    if (plane && !plane.coplanar) {
+      label = 'Noisy';
+    } else if (worstStdDev <= constants.TRUSTED_STDDEV && worstRange <= constants.TRUSTED_RANGE) {
       label = 'Trusted';
       tone = 'good';
     } else if (worstStdDev <= constants.APPROXIMATE_STDDEV && worstRange <= constants.APPROXIMATE_RANGE) {
@@ -144,32 +185,50 @@ export function baselineSummary(baselinePoints = {}, sides = SIDES, constants = 
     frontRearDelta: frontAvg !== null && rearAvg !== null ? frontAvg - rearAvg : null,
     worstStdDev,
     worstRange,
+    // P2-2: the fitted plane, its per-corner residuals, and whether the four points are coplanar.
+    plane,
+    planeResiduals: plane ? plane.residuals : {},
+    planeMaxResidual: plane ? plane.maxResidual : null,
+    planeCoplanar: plane ? plane.coplanar : null,
     label,
     tone,
   };
 }
 
-// P1-2: the baseline plane is built from LEVEL-mode floor readings (phone flat, world Z up).
-// Compensation is only dimensionally valid when the measured mode shares that world reference.
-//   - level  : same orientation/axis as the baseline -> subtract the side's deviation from the plane.
-//   - pitch  : front/rear floor slope IS the pitch datum -> subtract the front/rear baseline deviation.
-//   - camber : the phone is upright (different world axis), so subtracting a level-plane height is
-//              dimensionally wrong. Return 0 until a proper 3D plane projection exists.
-//              TODO(stage-6): the plane fit (roadmap P? stage 6) projects the level baseline normal
-//              onto the camber measurement axis; that projection is the correct camber correction.
+// P1-2 / P2-2: the baseline plane is fit (least squares) from LEVEL-mode floor readings (phone
+// flat, world Z up). Compensation projects the relevant component of that plane onto the measured
+// mode's axis, so the dimensionally-correct correction now comes from the plane SLOPES, not naive
+// two-reading deltas:
+//   - level  : subtract the plane height at this corner relative to the plane mean (a*x + b*y).
+//   - pitch  : the front<->rear floor slope IS the pitch datum -> subtract the y-axis slope (b*y).
+//   - camber : P2-2 enables the projection the stage-4 comment promised. Camber is read with the
+//              phone upright measuring left<->right wheel-face tilt, which shares the level plane's
+//              LEFT-RIGHT world axis. So the left-right floor slope at this corner (a*x) biases an
+//              upright reading and is the correct camber compensation. Front<->rear floor slope is
+//              orthogonal to the camber axis and is intentionally NOT subtracted.
 //   - toe    : not derived from the floor plane -> excluded.
+// Falls back to the pre-P2-2 deviations when no plane could be fit (e.g. fewer than 3 corners,
+// reached only via direct calls — precisionSummary gates this on summary.complete anyway).
 export function baselineCompensationForSide(side, mode, summary) {
   if (!summary || !summary.complete) return 0;
+  const plane = summary.plane;
+  const pos = CORNER_POSITIONS[side];
   if (mode === 'level') {
+    if (plane && pos) return planeHeightForSide(side, plane) - plane.c;
     const stats = summary.sideStats[side];
     return stats ? stats.mean - summary.overallMean : 0;
   }
   if (mode === 'pitch') {
-    // Pitch is a front-vs-rear slope; compensate by how far this side's front/rear pair
-    // deviates from the overall plane mean (front sides share frontAvg, rears share rearAvg).
+    // Front<->rear slope projected at this corner's y position.
+    if (plane && pos) return plane.b * pos.y;
     const isFront = side === 'FL' || side === 'FR';
     const pairAvg = isFront ? summary.frontAvg : summary.rearAvg;
     return pairAvg !== null ? pairAvg - summary.overallMean : 0;
+  }
+  if (mode === 'camber') {
+    // Left<->right slope projected at this corner's x position (same world axis as camber).
+    if (plane && pos) return plane.a * pos.x;
+    return 0;
   }
   return 0;
 }

@@ -19,7 +19,7 @@ npm test
 
 **Every release that changes any asset MUST bump the cache version in lockstep**, or PWA users who already installed the app will keep running stale modules from the service-worker cache:
 
-1. Bump `CACHE_NAME` in `service-worker.js` (e.g. `evanline-v8` → `evanline-v9`).
+1. Bump `CACHE_NAME` in `service-worker.js` (e.g. `evanline-v9` → `evanline-v10`).
 2. Update the `?v=` querystrings to the same number in:
    - `service-worker.js` (`./assets/css/styles.css?v=N`, `./assets/js/app.js?v=N`)
    - `index.html` (the `styles.css?v=N` stylesheet link and the `app.js?v=N` module script tag)

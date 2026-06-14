@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  applyScaleCalibration,
   average,
   bufferDrift,
   buildArcPath,
@@ -11,17 +12,26 @@ import {
   clamp,
   clampAngle,
   computeSampleQuality,
+  deltaContextMatch,
+  fitPlane,
   flipSelfTest,
   gravityFromEuler,
+  headingTrust,
   inclinationForMode,
   levelDeg,
   motionIsQuasiStatic,
+  normalizeBaselinePoint,
+  normalizeCalibrationMeta,
+  normalizeCaptureSnapshot,
+  normalizeMeasurement,
   pitchDeg,
+  planeHeightForSide,
   polarPoint,
   poseFamilyForMode,
   poseOkForMode,
   poseOrientation,
   preferredOrientationForMode,
+  scaleGainFromReference,
   standardDeviation,
   toleranceHalfWidth,
 } from '../assets/js/domain.js';
@@ -405,4 +415,209 @@ test('calibrationZeroValid binds a stored zero to its capture orientation family
   // Optional currentOrientation also requires the live pose to match the family.
   assert.equal(calibrationZeroValid('camber', portraitZero, 'portrait'), true);
   assert.equal(calibrationZeroValid('camber', portraitZero, 'landscape'), false);
+});
+
+// --- P2-1: two-point scale calibration ----------------------------------------------------------
+
+test('scaleGainFromReference derives gain = true/measured and rejects bad captures (P2-1)', () => {
+  // Sensor reads 9.0° on a true 10.0° wedge -> gain 10/9 ~= 1.111.
+  assert.ok(Math.abs(scaleGainFromReference(10, 9) - 10 / 9) < 1e-9);
+  // Reading exactly true -> unity gain.
+  assert.equal(scaleGainFromReference(10, 10), 1);
+  // A measured value too close to zero is meaningless (division blows up) -> null.
+  assert.equal(scaleGainFromReference(10, 0.1), null);
+  // Non-finite inputs -> null.
+  assert.equal(scaleGainFromReference(NaN, 9), null);
+  assert.equal(scaleGainFromReference(10, NaN), null);
+  // Implausible gains (outside [1/maxGain, maxGain]) are rejected so a fat-finger entry cannot
+  // corrupt every reading: true 60° on a measured 1° would be gain 60.
+  assert.equal(scaleGainFromReference(60, 1), null);
+  // Opposite signs give a negative gain, which is rejected.
+  assert.equal(scaleGainFromReference(-10, 9), null);
+});
+
+test('applyScaleCalibration applies (raw - offset) * gain with safe defaults (P2-1)', () => {
+  // Default offset 0, gain 1 -> identity.
+  assert.equal(applyScaleCalibration(5), 5);
+  // Subtract the zero, then scale.
+  assert.ok(Math.abs(applyScaleCalibration(11, 1, 1.1) - 11) < 1e-9); // (11-1)*1.1 = 11
+  assert.ok(Math.abs(applyScaleCalibration(10, 0, 1.111) - 11.11) < 1e-9);
+  // Null/non-finite raw stays null (preserves the no-reading pipeline).
+  assert.equal(applyScaleCalibration(null), null);
+  assert.equal(applyScaleCalibration(NaN, 1, 2), null);
+  // A garbage gain (<=0 or non-finite) degrades to unity, never zeroes the reading.
+  assert.equal(applyScaleCalibration(5, 0, 0), 5);
+  assert.equal(applyScaleCalibration(5, 0, NaN), 5);
+});
+
+// --- P2-2: 4-corner least-squares plane fit -----------------------------------------------------
+
+test('fitPlane recovers slopes and intercept for coplanar corners (P2-2)', () => {
+  // z = 0.05*x + 0.10*y + 0.05 evaluated at the four unit-square corners.
+  const plane = fitPlane({ FL: 0.10, FR: 0.20, RL: -0.10, RR: 0.00 });
+  assert.ok(Math.abs(plane.a - 0.05) < 1e-9);
+  assert.ok(Math.abs(plane.b - 0.10) < 1e-9);
+  assert.ok(Math.abs(plane.c - 0.05) < 1e-9);
+  assert.ok(plane.maxResidual < 1e-9);
+  assert.equal(plane.coplanar, true);
+  // planeHeightForSide reproduces each corner exactly.
+  assert.ok(Math.abs(planeHeightForSide('FL', plane) - 0.10) < 1e-9);
+  assert.ok(Math.abs(planeHeightForSide('RR', plane) - 0.00) < 1e-9);
+});
+
+test('fitPlane flags a non-coplanar datum via per-corner residuals (P2-2)', () => {
+  // Push RR well off the plane (0.5° from the otherwise-coplanar 0.0). The least-squares fit
+  // spreads the error, but the per-corner residual (δ/4 = 0.125) exceeds the default 0.08
+  // tolerance so coplanar is false.
+  const plane = fitPlane({ FL: 0.10, FR: 0.20, RL: -0.10, RR: 0.50 });
+  assert.equal(plane.coplanar, false);
+  assert.ok(plane.maxResidual > 0.08);
+  // Residuals are keyed per corner so the UI can name the outlier.
+  assert.ok(Object.keys(plane.residuals).length === 4);
+});
+
+test('fitPlane returns null with fewer than three points (P2-2)', () => {
+  assert.equal(fitPlane({ FL: 0.1, FR: 0.2 }), null);
+  assert.equal(fitPlane([{ x: 0, y: 0, z: 1 }, { x: 1, y: 0, z: 1 }]), null);
+  // Non-finite z values are dropped before the 3-point check.
+  assert.equal(fitPlane({ FL: NaN, FR: 0.2, RL: 0.1 }), null);
+});
+
+test('planeHeightForSide is 0 without a usable plane or known corner (P2-2)', () => {
+  assert.equal(planeHeightForSide('FL', null), 0);
+  assert.equal(planeHeightForSide('FL', { a: NaN, b: 0, c: 0 }), 0);
+  assert.equal(planeHeightForSide('ZZ', { a: 1, b: 1, c: 1 }), 0);
+});
+
+// --- P2-4: compass / heading awareness ----------------------------------------------------------
+
+test('headingTrust trusts only an absolute compass heading with acceptable accuracy (P2-4)', () => {
+  // Good Safari heading: absolute compass + tight accuracy -> trusted.
+  const good = headingTrust({ absolute: true, webkitCompassHeading: 90, webkitCompassAccuracy: 10 });
+  assert.equal(good.trusted, true);
+  assert.equal(good.heading, 90);
+  // Poor accuracy (indoor distortion) -> not trusted.
+  const poor = headingTrust({ webkitCompassHeading: 90, webkitCompassAccuracy: 40 });
+  assert.equal(poor.trusted, false);
+  assert.equal(poor.reason, 'poor-accuracy');
+  // Negative accuracy means interference/unknown -> not trusted.
+  assert.equal(headingTrust({ webkitCompassHeading: 90, webkitCompassAccuracy: -1 }).trusted, false);
+  // Absolute alpha but no compass heading -> usable orientation but not a trusted heading.
+  const noHeading = headingTrust({ absolute: true });
+  assert.equal(noHeading.trusted, false);
+  assert.equal(noHeading.reason, 'no-heading');
+  // Relative-only (no absolute, no compass) -> raw alpha must never be used as yaw.
+  const relative = headingTrust({ absolute: false });
+  assert.equal(relative.trusted, false);
+  assert.equal(relative.reason, 'relative');
+  // A compass heading with NO accuracy estimate is still trusted (Safari often omits accuracy).
+  assert.equal(headingTrust({ webkitCompassHeading: 12 }).trusted, true);
+});
+
+// --- P2-3: delta context guard ------------------------------------------------------------------
+
+test('deltaContextMatch flags mismatched calibration/orientation contexts (P2-3)', () => {
+  const base = { offsetUsed: 0.2, gainUsed: 1.0, pose: 'portrait', deviceRefTime: 't1', fixtureId: 'f1' };
+  // Identical context -> ok.
+  assert.deepEqual(deltaContextMatch(base, { ...base }), { ok: true, reasons: [] });
+  // Different zero offset.
+  assert.deepEqual(deltaContextMatch(base, { ...base, offsetUsed: 0.5 }).reasons, ['zero offset']);
+  // Different scale gain.
+  assert.deepEqual(deltaContextMatch(base, { ...base, gainUsed: 1.1 }).reasons, ['scale gain']);
+  // Different pose/orientation.
+  assert.deepEqual(deltaContextMatch(base, { ...base, pose: 'landscape' }).reasons, ['orientation/pose']);
+  // Different device reference + fixture stack up.
+  const both = deltaContextMatch(base, { ...base, deviceRefTime: 't2', fixtureId: 'f2' });
+  assert.equal(both.ok, false);
+  assert.deepEqual(both.reasons, ['device reference', 'fixture']);
+  // Missing one side never blocks (nothing to compare).
+  assert.equal(deltaContextMatch(null, base).ok, true);
+  // Legacy readings with absent stamps compare as "unknown" -> non-blocking.
+  assert.equal(deltaContextMatch({ value: 1 }, { value: 2 }).ok, true);
+  // Falls back to orientation when pose is absent.
+  assert.equal(deltaContextMatch({ orientation: 'portrait' }, { orientation: 'landscape' }).ok, false);
+});
+
+// --- P2-5: persistence normalization / migration ------------------------------------------------
+
+test('normalizeCaptureSnapshot tolerates legacy and stamps new context fields (P2-5)', () => {
+  // Legacy snapshot: only value present. Missing fields coerce to the pre-P2 defaults.
+  const legacy = normalizeCaptureSnapshot({ value: 1.23 }, 'NOW');
+  assert.equal(legacy.value, 1.23);
+  assert.equal(legacy.rawValue, null);      // P1-1 fallback path
+  assert.equal(legacy.offsetUsed, null);
+  assert.equal(legacy.gainUsed, 1);         // P2-1 unity default
+  assert.equal(legacy.toleranceDeg, null);
+  assert.equal(legacy.pose, null);
+  assert.equal(legacy.fixtureId, '');
+  assert.equal(legacy.time, 'NOW');
+  // Full snapshot: every field carried through.
+  const full = normalizeCaptureSnapshot({
+    value: 0.85, rawValue: 1.05, offsetUsed: 0.2, gainUsed: 1.1, toleranceDeg: 0.04,
+    orientation: 'landscape', pose: 'landscape', deviceRefTime: 'dt', fixtureId: 'fx', time: 't',
+  });
+  assert.equal(full.rawValue, 1.05);
+  assert.equal(full.gainUsed, 1.1);
+  assert.equal(full.pose, 'landscape');
+  assert.equal(full.deviceRefTime, 'dt');
+  assert.equal(full.fixtureId, 'fx');
+  // A non-positive gain is treated as unity, never carried through as 0.
+  assert.equal(normalizeCaptureSnapshot({ value: 1, gainUsed: 0 }).gainUsed, 1);
+});
+
+test('normalizeCalibrationMeta migrates v2 zero data and carries the optional scale (P2-5)', () => {
+  // v2-style entry (no gain) loads unchanged with unity behaviour.
+  const v2 = normalizeCalibrationMeta({ offset: 1.2, time: 't', orientation: 'portrait' });
+  assert.equal(v2.offset, 1.2);
+  assert.equal(v2.orientation, 'portrait');
+  assert.equal(v2.gain, undefined);
+  // An entry with no finite offset is "not zeroed".
+  assert.equal(normalizeCalibrationMeta({ time: 't', orientation: 'portrait' }), null);
+  assert.equal(normalizeCalibrationMeta(null), null);
+  // A stored scale is carried forward; a bad orientation coerces to portrait.
+  const scaled = normalizeCalibrationMeta({ offset: 0.5, time: 't', orientation: 'weird', gain: 1.1, gainReference: 10, gainTime: 'g' });
+  assert.equal(scaled.orientation, 'portrait');
+  assert.equal(scaled.gain, 1.1);
+  assert.equal(scaled.gainReference, 10);
+  assert.equal(scaled.gainTime, 'g');
+  // A non-positive gain is dropped (behaves as unity).
+  assert.equal(normalizeCalibrationMeta({ offset: 0.5, time: 't', orientation: 'portrait', gain: 0 }).gain, undefined);
+});
+
+test('normalizeMeasurement preserves context stamps and bounded history (P2-5)', () => {
+  const m = normalizeMeasurement({
+    mode: 'camber', side: 'FL', value: 1.0, offsetUsed: 0.2, gainUsed: 1.1,
+    pose: 'portrait', deviceRefTime: 'd', fixtureId: 'f',
+    history: [{ value: 0.9, time: 'h1' }, { value: 0.95, time: 'h2' }],
+  }, 'NOW', 4);
+  assert.equal(m.id, 'camber-FL');
+  assert.equal(m.offsetUsed, 0.2);
+  assert.equal(m.gainUsed, 1.1);
+  assert.equal(m.pose, 'portrait');
+  assert.equal(m.history.length, 2);
+  assert.equal(m.history[0].value, 0.9);
+  // Legacy reading: no stamps, no history -> nulls and empty history, still loads.
+  const legacy = normalizeMeasurement({ mode: 'level', side: 'FR', value: 0.3 }, 'NOW');
+  assert.equal(legacy.offsetUsed, null);
+  assert.equal(legacy.gainUsed, null);
+  assert.equal(legacy.history.length, 0);
+  // History is bounded to maxHistory (keeps the most recent).
+  const many = normalizeMeasurement({
+    mode: 'pitch', side: 'RR', value: 5,
+    history: [{ value: 1 }, { value: 2 }, { value: 3 }, { value: 4 }, { value: 5 }, { value: 6 }],
+  }, 'NOW', 3);
+  assert.equal(many.history.length, 3);
+  assert.deepEqual(many.history.map(h => h.value), [4, 5, 6]);
+});
+
+test('normalizeBaselinePoint coerces quality fields and defaults the time (P2-5)', () => {
+  const p = normalizeBaselinePoint({ value: 0.1, confidence: 80, orientation: 'landscape' }, 'NOW');
+  assert.equal(p.value, 0.1);
+  assert.equal(p.confidence, 80);
+  assert.equal(p.orientation, 'landscape');
+  assert.equal(p.time, 'NOW');
+  // Missing/garbage fields fall back to safe defaults.
+  const bare = normalizeBaselinePoint({ value: 0.2 }, 'NOW');
+  assert.equal(bare.confidence, 0);
+  assert.equal(bare.orientation, 'portrait');
 });

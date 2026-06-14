@@ -9,7 +9,7 @@
   <meta name="theme-color" content="#0d1117" />
   <link rel="manifest" href="manifest.json" />
   <title>Evanline – Wheel Alignment</title>
-    <link rel="stylesheet" href="assets/css/styles.css?v=9" />
+    <link rel="stylesheet" href="assets/css/styles.css?v=10" />
 
 </head>
 <body>
@@ -375,8 +375,13 @@
       <span class="cal-title">Calibration Offset</span>
       <span class="cal-value" id="cal-value-text">None — tap Zero This Mode to calibrate</span>
       <span class="cal-history" id="cal-history-text">Saved locally per mode.</span>
+      <span class="cal-history" id="cal-scale-text">Scale: 1.00× (no scale reference)</span>
     </div>
-    <button class="btn btn-ghost btn-small" data-action="calibrate">Set</button>
+    <div class="cal-actions">
+      <button class="btn btn-ghost btn-small" data-action="calibrate">Set zero</button>
+      <button class="btn btn-ghost btn-small" id="btn-set-scale" data-action="calibrateScale" title="Hold the phone on a KNOWN reference angle, then enter it to scale readings.">Set scale</button>
+      <button class="btn btn-ghost btn-small" id="btn-reset-scale" data-action="resetScaleCalibration" title="Reset the scale gain to 1.00 (keeps the zero).">Reset scale</button>
+    </div>
   </div>
 
   <div class="gauge-card">
@@ -431,6 +436,10 @@
         <div class="advanced-item">
           <span class="advanced-label">Sample spread</span>
           <strong class="advanced-value" id="sample-spread">—</strong>
+        </div>
+        <div class="advanced-item">
+          <span class="advanced-label">Heading</span>
+          <strong class="advanced-value" id="heading-trust">—</strong>
         </div>
       </div>
       <div class="mode-cal-list" id="mode-cal-list"></div>
@@ -556,7 +565,7 @@
   <div class="instr-spacer"></div>
 </div>
 
-<script type="module" src="assets/js/app.js?v=9"></script>
+<script type="module" src="assets/js/app.js?v=10"></script>
 
 <dialog id="fixture-dialog" class="fixture-dialog" aria-labelledby="fixture-dialog-title">
   <form method="dialog" id="fixture-form" class="fixture-form">

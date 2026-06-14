@@ -83,11 +83,17 @@ test('baselineCompensationForSide keeps the per-side deviation for level (P1-2)'
   assert.ok(Math.abs(baselineCompensationForSide('RL', 'level', summary) - -0.15) < 1e-9);
 });
 
-test('baselineCompensationForSide EXCLUDES camber until the plane fit exists (P1-2)', () => {
-  // Subtracting a level-plane height from an upright camber reading is dimensionally wrong.
+test('baselineCompensationForSide projects the left-right plane slope onto camber (P2-2)', () => {
+  // P2-2 wires camber to the plane projection the stage-4 comment promised: the left<->right
+  // floor slope (plane.a) at this corner's x position biases an upright wheel-face reading.
+  // For FL=0.10, FR=0.20, RL=-0.10, RR=0.00 the fitted plane has a=0.05, b=0.10, c=0.05.
   const summary = planeSummary();
-  assert.equal(baselineCompensationForSide('FL', 'camber', summary), 0);
-  assert.equal(baselineCompensationForSide('RR', 'camber', summary), 0);
+  assert.ok(Math.abs(summary.plane.a - 0.05) < 1e-9);
+  // FL is at x=-1, so camber compensation = a * x = 0.05 * -1 = -0.05.
+  assert.ok(Math.abs(baselineCompensationForSide('FL', 'camber', summary) - -0.05) < 1e-9);
+  // RR is at x=+1, so camber compensation = a * x = 0.05 * 1 = 0.05.
+  assert.ok(Math.abs(baselineCompensationForSide('RR', 'camber', summary) - 0.05) < 1e-9);
+  // The orthogonal front<->rear slope is intentionally NOT folded into camber.
 });
 
 test('baselineCompensationForSide adds front/rear pitch compensation (P1-2)', () => {
@@ -103,6 +109,40 @@ test('baselineCompensationForSide adds front/rear pitch compensation (P1-2)', ()
 test('baselineCompensationForSide keeps toe excluded (P1-2)', () => {
   const summary = planeSummary();
   assert.equal(baselineCompensationForSide('FL', 'toe', summary), 0);
+});
+
+test('baselineSummary fits a least-squares plane and exposes residuals (P2-2)', () => {
+  const summary = planeSummary();
+  // Plane z = 0.05*x + 0.10*y + 0.05 over the four corners.
+  assert.ok(Math.abs(summary.plane.a - 0.05) < 1e-9);
+  assert.ok(Math.abs(summary.plane.b - 0.10) < 1e-9);
+  assert.ok(Math.abs(summary.plane.c - 0.05) < 1e-9);
+  assert.equal(summary.planeCoplanar, true);
+  assert.ok(summary.planeMaxResidual < 1e-9);
+});
+
+test('baselineSummary downgrades a non-coplanar baseline to Noisy (P2-2)', () => {
+  // One corner well off the plane: even with tight per-corner repeatability, the baseline plane
+  // is untrustworthy, so the label is Noisy regardless of stdDev/range.
+  const summary = baselineSummary({
+    FL: [{ value: 0.0 }],
+    FR: [{ value: 0.0 }],
+    RL: [{ value: 0.0 }],
+    RR: [{ value: 0.5 }],
+  });
+  assert.equal(summary.complete, true);
+  assert.equal(summary.planeCoplanar, false);
+  assert.equal(summary.label, 'Noisy');
+});
+
+test('baselineCompensationForSide uses plane slopes for level and pitch (P2-2)', () => {
+  const summary = planeSummary();
+  // Level: plane height at the corner minus the plane mean. FL height 0.10 - c 0.05 = 0.05.
+  assert.ok(Math.abs(baselineCompensationForSide('FL', 'level', summary) - 0.05) < 1e-9);
+  assert.ok(Math.abs(baselineCompensationForSide('RL', 'level', summary) - -0.15) < 1e-9);
+  // Pitch: front<->rear slope projected at the corner's y. Front (y=+1) = b*1 = 0.10.
+  assert.ok(Math.abs(baselineCompensationForSide('FL', 'pitch', summary) - 0.10) < 1e-9);
+  assert.ok(Math.abs(baselineCompensationForSide('RR', 'pitch', summary) - -0.10) < 1e-9);
 });
 
 test('reversalFromCaptures cancels the shared zero from raw means (P1-1)', () => {
@@ -130,6 +170,25 @@ test('reversalFromCaptures flags an offset conflict and a forward-only zeroed va
   assert.ok(Math.abs(forwardOnly.forwardZeroed - 0.85) < 1e-9);
   assert.equal(forwardOnly.reversalBias, null);
   assert.equal(forwardOnly.offsetConflict, false);
+});
+
+test('reversalFromCaptures applies a shared scale gain after offset cancellation (P2-1/P2-2)', () => {
+  // Same raw means as the canonical case (corrected 1.0, bias 0.05) but with a shared 1.1x scale
+  // gain stamped on every capture. Gain is applied AFTER the offset cancellation, so the corrected
+  // value and bias both scale by 1.1 while the cancellation itself is untouched.
+  const result = reversalFromCaptures({
+    forward: [{ value: 0.85, rawValue: 1.05, offsetUsed: 0.2, gainUsed: 1.1 }],
+    reverse: [{ value: -1.15, rawValue: -0.95, offsetUsed: 0.2, gainUsed: 1.1 }],
+  });
+  assert.ok(Math.abs(result.reversalCorrectedValue - 1.1) < 1e-9);   // 1.0 * 1.1
+  assert.ok(Math.abs(result.reversalBias - 0.055) < 1e-9);           // 0.05 * 1.1
+  assert.equal(result.offsetConflict, false);
+  // Legacy captures (no gainUsed) default to unity gain -> unchanged behaviour.
+  const legacy = reversalFromCaptures({
+    forward: [{ value: 0.85, rawValue: 1.05, offsetUsed: 0.2 }],
+    reverse: [{ value: -1.15, rawValue: -0.95, offsetUsed: 0.2 }],
+  });
+  assert.ok(Math.abs(legacy.reversalCorrectedValue - 1.0) < 1e-9);
 });
 
 test('precisionSummary blocks save when forward captures are missing', () => {

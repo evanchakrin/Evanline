@@ -16,6 +16,10 @@ Uses the iPhone's built-in **gyroscope & accelerometer** (DeviceOrientation API)
 | **Sensor smoothing** | Smooths the live feed and averages recent samples before display |
 | **Settled detection** | Shows when the phone is stable enough to trust the reading |
 | **Per-mode calibration** | Keeps a separate zero offset for each mode |
+| **Two-point scale calibration** | Optionally capture a known reference angle so readings are scaled as `(raw − zero) × gain`, correcting a sensor that under/over-reports. Defaults to unity gain (no-op) until set |
+| **4-corner plane fit** | Fits a least-squares plane to the FL/FR/RL/RR Level baseline and reports per-corner residuals, so a non-coplanar (bad/mis-placed) datum is flagged instead of silently averaged. Level/pitch compensation, and the camber left-right projection, come from the plane slopes |
+| **Per-corner save history** | Each save keeps a small rolling history per side and stamps the active zero, scale, orientation/pose, device reference, and fixture. Left-right / front-rear deltas warn when computed across mismatched calibration contexts |
+| **Compass awareness** | Reads the absolute compass heading (and Safari accuracy) and warns "heading not trusted" under indoor magnetic distortion; raw `alpha` is never used as a yaw reference |
 | **Quick / Precision workflows** | Fast single-save mode or a deeper session with baseline, fixture, and repeatability checks |
 | **Device reference** | Capture a trusted device bias reference and reuse it across modes |
 | **Fixture profiles** | Save named jig / fixture setups locally, including whether the fixture is reversible |
@@ -79,6 +83,7 @@ Honest measurement matters more than a precise-looking digit. Follow these rules
 4. **Do the flip test.** Run the **180° flip self-test** before trusting a value: read, flip the phone 180° about the measurement axis, read again. A true inclinometer reads equal-and-opposite, so the residual bias `(a + b) / 2` should be near zero. Repeatability alone is **not** trueness.
 5. **Toe is geometric.** The phone cannot measure toe. Use string lines, turn plates, or `atan(front-vs-rear rim offset / rim length)`.
 6. **Read the band, not the digit.** Every saved value carries a `± Y.YY° (95%)` confidence band. Treat the band — not the single displayed digit — as the real result.
+7. **Scale-calibrate against a known angle (optional).** After zeroing, if you have a machined reference wedge, tap **Set scale**, hold the phone on it, and enter the true angle. The app derives `gain = true / measured` and scales every later reading, correcting a sensor that under/over-reports. Left unset, the gain stays `1.00×` (no change).
 
 ---
 

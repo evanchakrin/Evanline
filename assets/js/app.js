@@ -1,18 +1,26 @@
 import {
+  applyScaleCalibration,
   average,
   buildArcPath,
   calibrationZeroValid,
   captureSeriesStats,
   clampAngle as clampAngleInRange,
   computeSampleQuality,
+  deltaContextMatch,
   flipSelfTest,
   gravityFromEuler,
+  headingTrust,
   inclinationForMode,
   motionIsQuasiStatic,
+  normalizeBaselinePoint,
+  normalizeCalibrationMeta,
+  normalizeCaptureSnapshot,
+  normalizeMeasurement,
   polarPoint,
   poseOkForMode,
   poseOrientation,
   preferredOrientationForMode,
+  scaleGainFromReference,
   standardDeviation,
 } from './domain.js';
 import {
@@ -106,6 +114,9 @@ const SELF_TEST_FRESH_MS = 30 * 60 * 1000;
 const PRECISION_CAPTURE_TARGET = 6;
 const BASELINE_POINT_TARGET = 3;
 const BASELINE_CAPTURE_TARGET = 2;
+// P2-3: how many PRIOR saved values to keep per mode+side so a save no longer blindly discards
+// the previous reading (a small history, not the full log).
+const MEASUREMENT_HISTORY_DEPTH = 4;
 
 const state = {
   mode: 'level',
@@ -129,6 +140,14 @@ const state = {
   lastSensorWallTime: 0,
   // P0-5: true while the chosen gravity/axis yields no finite reading (don't feed 0 in).
   readingMissing: false,
+  // P2-4: compass/heading awareness. headingTrusted is true only when an ABSOLUTE compass heading
+  // with acceptable accuracy is available; otherwise heading is relative/poor and must NOT be used
+  // as a yaw reference (raw alpha is never trusted). heading/headingAccuracy/headingReason hold the
+  // last verdict for the UI warning that supports future toe/squareness work.
+  headingTrusted: false,
+  heading: null,
+  headingAccuracy: null,
+  headingReason: 'unavailable',
   calibrationOffsets: defaultOffsets(),
   calibrationMeta: defaultCalibrationMeta(),
   deviceProfile: null,
@@ -426,22 +445,33 @@ function ensurePrecisionBucket(mode = state.mode, side = state.selectedSide) {
 function buildCaptureSnapshot() {
   // P1-1: record the RAW (pre-calibration) angle and the per-mode offset that was active so the
   // reversal step can cancel the shared zero in (F_raw - R_raw)/2 even if the operator re-zeros
-  // between forward and reverse. `value` stays the display-only zeroed reading. rawAngle is the
-  // un-offset gravity angle; it falls back to value+offset when no live angle is available (e.g.
-  // toe), so rawValue - offsetUsed always reconstructs the displayed value.
+  // between forward and reverse. `value` stays the display-only calibrated reading. rawAngle is
+  // the un-offset/un-scaled gravity angle; it falls back to (value/gain + offset) when no live
+  // angle is available (e.g. toe), so rawValue - offsetUsed reconstructs the pre-scale value.
   const value = Number(sampleAverage().toFixed(3));
   const offsetUsed = effectiveOffset(state.mode);
+  const gainUsed = effectiveGain(state.mode);
   const rawAngle = rawAngleForMode(state.mode);
-  const rawValue = Number((rawAngle === null ? value + offsetUsed : rawAngle).toFixed(3));
+  const rawValue = Number((rawAngle === null ? (value / (gainUsed || 1)) + offsetUsed : rawAngle).toFixed(3));
   return {
     value,
     rawValue,
     offsetUsed: Number(offsetUsed.toFixed(3)),
+    // P2-1 / P2-3: stamp the multiplicative gain that was active so the capture's full calibration
+    // context is recoverable later (and a re-scale between captures is detectable like a re-zero).
+    gainUsed: Number((gainUsed || 1).toFixed(4)),
     confidence: state.confidence,
     samples: state.sampleBuffer.length,
     range: Number(sampleRange().toFixed(3)),
     stdDev: Number(sampleStdDev().toFixed(3)),
+    // P1-4 / P2-3: the live +/- band travels with the capture context.
+    toleranceDeg: Number.isFinite(state.toleranceDeg) ? Number(state.toleranceDeg.toFixed(3)) : null,
     orientation: state.screenOrientation,
+    // P2-3: pose (gravity-derived) and the device-reference id/time stamp the physical context so
+    // a delta computed across mismatched contexts can be flagged later.
+    pose: currentPoseOrientation(),
+    deviceRefTime: state.deviceProfile?.time || null,
+    fixtureId: state.precisionSession.fixtureId || '',
     time: new Date().toISOString(),
   };
 }
@@ -546,6 +576,20 @@ function effectiveOffset(mode = state.mode) {
   return zeroValidForCurrentPose(mode) ? (state.calibrationOffsets[mode] || 0) : 0;
 }
 
+// P2-1: the multiplicative scale gain to apply, bound to the same pose validity as the zero (a
+// scale captured against a known wedge only makes sense in the mode's pose). Defaults to 1
+// (no-op) when no scale was captured or the stored zero is not valid for the current pose.
+function effectiveGain(mode = state.mode) {
+  if (!zeroValidForCurrentPose(mode)) return 1;
+  const gain = state.calibrationMeta[mode]?.gain;
+  return Number.isFinite(gain) && gain > 0 ? gain : 1;
+}
+
+// P2-1: has a two-point scale been captured for this mode?
+function modeHasScale(mode = state.mode) {
+  return Number.isFinite(state.calibrationMeta[mode]?.gain) && state.calibrationMeta[mode].gain > 0;
+}
+
 // P1-3a: "is this mode effectively zeroed RIGHT NOW?" — a stored zero captured in the wrong
 // orientation family (or while the phone is currently posed in the wrong family) counts as
 // not zeroed, so the workflow re-surfaces the "Zero this mode" guidance instead of trusting
@@ -562,17 +606,18 @@ function modeZeroOrientationMismatch(mode = state.mode) {
 }
 
 function calibratedAngle(mode = state.mode) {
-  // Subtracts a constant from a physically true (gravity-derived) angle. Returns null
-  // when the underlying gravity-vector angle is unavailable (e.g. toe, or no sensor yet).
-  // P1-3a: the offset is only applied when the stored zero matches the current pose family.
+  // P2-1: calibrated = (raw - offset) * gain. Subtracts the additive zero, then applies the
+  // optional two-point scale gain (default 1). Returns null when the underlying gravity-vector
+  // angle is unavailable (e.g. toe, or no sensor yet). P1-3a: offset and gain are only applied
+  // when the stored zero matches the current pose family.
   const raw = rawAngleForMode(mode);
-  return raw === null ? null : raw - effectiveOffset(mode);
+  return applyScaleCalibration(raw, effectiveOffset(mode), effectiveGain(mode));
 }
 
 // P0-3: the un-smoothed calibrated angle that feeds rawSampleBuffer (stability/drift/conf).
 function rawCalibratedAngle(mode = state.mode) {
   const raw = rawAngleForMode(mode, true);
-  return raw === null ? null : raw - effectiveOffset(mode);
+  return applyScaleCalibration(raw, effectiveOffset(mode), effectiveGain(mode));
 }
 
 function sampleAverage() {
@@ -693,14 +738,9 @@ function loadState() {
     });
     const meta = defaultCalibrationMeta();
     MODES.forEach(mode => {
-      const item = parsed?.calibrationMeta?.[mode];
-      if (item && Number.isFinite(item.offset) && typeof item.time === 'string') {
-        meta[mode] = {
-          offset: item.offset,
-          time: item.time,
-          orientation: item.orientation === 'landscape' ? 'landscape' : 'portrait',
-        };
-      }
+      // P2-5: pure, tested normalization/migration (offset + optional P2-1 scale gain).
+      const normalized = normalizeCalibrationMeta(parsed?.calibrationMeta?.[mode]);
+      if (normalized) meta[mode] = normalized;
     });
 
     const measurements = Array.isArray(parsed?.measurements) ? parsed.measurements : [];
@@ -721,15 +761,7 @@ function loadState() {
       const series = Array.isArray(parsedSession?.baselinePoints?.[side]) ? parsedSession.baselinePoints[side] : [];
       acc[side] = series
         .filter(item => Number.isFinite(item?.value))
-        .map(item => ({
-          value: Number(item.value),
-          confidence: Number.isFinite(item.confidence) ? item.confidence : 0,
-          samples: Number.isFinite(item.samples) ? item.samples : 0,
-          range: Number.isFinite(item.range) ? item.range : 0,
-          stdDev: Number.isFinite(item.stdDev) ? item.stdDev : 0,
-          orientation: item.orientation === 'landscape' ? 'landscape' : 'portrait',
-          time: typeof item.time === 'string' ? item.time : new Date().toISOString(),
-        }));
+        .map(item => normalizeBaselinePoint(item));
       return acc;
     }, {});
     const captures = {};
@@ -738,19 +770,7 @@ function loadState() {
       if (!item || !MODES.includes(item.mode) || !SIDES.includes(item.side)) return;
       const normalizeSeries = series => (Array.isArray(series) ? series : [])
         .filter(entry => Number.isFinite(entry?.value))
-        .map(entry => ({
-          value: Number(entry.value),
-          // P1-1: tolerate legacy captures saved before raw-based reversal existed. When rawValue
-          // is absent, leave it null so reversalFromCaptures falls back to the display value.
-          rawValue: Number.isFinite(entry.rawValue) ? Number(entry.rawValue) : null,
-          offsetUsed: Number.isFinite(entry.offsetUsed) ? Number(entry.offsetUsed) : null,
-          confidence: Number.isFinite(entry.confidence) ? entry.confidence : 0,
-          samples: Number.isFinite(entry.samples) ? entry.samples : 0,
-          range: Number.isFinite(entry.range) ? entry.range : 0,
-          stdDev: Number.isFinite(entry.stdDev) ? entry.stdDev : 0,
-          orientation: entry.orientation === 'landscape' ? 'landscape' : 'portrait',
-          time: typeof entry.time === 'string' ? entry.time : new Date().toISOString(),
-        }));
+        .map(entry => normalizeCaptureSnapshot(entry));
       captures[key] = {
         mode: item.mode,
         side: item.side,
@@ -781,26 +801,8 @@ function loadState() {
     };
     state.measurements = measurements
       .filter(item => MODES.includes(item.mode) && SIDES.includes(item.side) && Number.isFinite(item.value))
-      .map(item => ({
-        id: `${item.mode}-${item.side}`,
-        mode: item.mode,
-        side: item.side,
-        value: Number(item.value),
-        confidence: Number.isFinite(item.confidence) ? item.confidence : 0,
-        // P1-4: tolerate older readings saved before the +/- band existed.
-        toleranceDeg: Number.isFinite(item.toleranceDeg) ? Number(item.toleranceDeg) : null,
-        samples: Number.isFinite(item.samples) ? item.samples : 0,
-        time: typeof item.time === 'string' ? item.time : new Date().toISOString(),
-        workflow: item.workflow === 'precision' ? 'precision' : 'quick',
-        rawValue: Number.isFinite(item.rawValue) ? Number(item.rawValue) : null,
-        correctedValue: Number.isFinite(item.correctedValue) ? Number(item.correctedValue) : null,
-        reversalBias: Number.isFinite(item.reversalBias) ? Number(item.reversalBias) : null,
-        repeatabilityScore: Number.isFinite(item.repeatabilityScore) ? item.repeatabilityScore : null,
-        captureCount: Number.isFinite(item.captureCount) ? item.captureCount : null,
-        baselineQuality: typeof item.baselineQuality === 'string' ? item.baselineQuality : null,
-        trustVerdict: typeof item.trustVerdict === 'string' ? item.trustVerdict : null,
-        fixtureId: typeof item.fixtureId === 'string' ? item.fixtureId : '',
-      }));
+      // P2-5: pure, tested normalization incl. P2-3 context stamps and bounded save history.
+      .map(item => normalizeMeasurement(item, new Date().toISOString(), MEASUREMENT_HISTORY_DEPTH));
   } catch (error) {
     state.calibrationOffsets = defaultOffsets();
     state.calibrationMeta = defaultCalibrationMeta();
@@ -931,6 +933,19 @@ function onOrientation(event) {
   state.gravityFresh = gravityIsFresh();
   // P0-4: refresh the physical-pose hint (gravity-based), not the screen aspect ratio.
   updateOrientationPose();
+  // P2-4: read the compass/heading. iOS exposes webkitCompassHeading (+ webkitCompassAccuracy);
+  // the W3C `absolute` flag says whether alpha is earth-referenced at all. We NEVER use raw alpha
+  // as a yaw reference — only a trusted absolute compass heading counts, and indoor magnetic
+  // distortion (poor/negative accuracy) is surfaced as a warning for the future toe/squareness work.
+  const trust = headingTrust({
+    absolute: !!event.absolute,
+    webkitCompassHeading: Number.isFinite(event.webkitCompassHeading) ? event.webkitCompassHeading : null,
+    webkitCompassAccuracy: Number.isFinite(event.webkitCompassAccuracy) ? event.webkitCompassAccuracy : null,
+  });
+  state.headingTrusted = trust.trusted;
+  state.heading = trust.heading;
+  state.headingAccuracy = trust.accuracy;
+  state.headingReason = trust.reason || (trust.trusted ? 'trusted' : 'unavailable');
   // P1-6: orientation events keep the stream alive too.
   state.lastSensorEventTime = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
   state.lastSensorWallTime = Date.now();
@@ -1230,6 +1245,78 @@ function calibrate() {
   refreshUI();
 }
 
+// P2-1: two-point SCALE calibration. After zeroing, hold the phone on a KNOWN reference angle
+// (e.g. a machined 10° wedge) and enter that true angle; gain = trueAngle / measuredAngle scales
+// every subsequent reading. Requires the mode to already be zeroed in the right pose so the
+// measured value is the post-zero deflection. Default gain stays 1 until this is captured.
+function calibrateScale() {
+  if (!state.sensorListenerAttached) {
+    setNotice('Tap Start Measuring before capturing a scale reference.', 'warn');
+    refreshUI();
+    return;
+  }
+  if (state.mode === 'toe') {
+    setNotice('Toe has no sensor reading, so a scale reference does not apply. Measure toe geometrically.', 'warn');
+    refreshUI();
+    return;
+  }
+  if (!modeIsZeroed()) {
+    setNotice('Zero this mode in the correct pose before capturing a scale reference.', 'warn');
+    refreshUI();
+    return;
+  }
+  if (!state.settled) {
+    setNotice('Hold the phone steady on the known angle until it settles before capturing the scale.', 'warn');
+    refreshUI();
+    return;
+  }
+  // The measured deflection is the post-zero angle WITHOUT the existing gain (we are recomputing it).
+  const raw = rawAngleForMode();
+  if (raw === null) {
+    setNotice('No gravity-derived angle is available for this mode yet. Hold steady and try again.', 'warn');
+    refreshUI();
+    return;
+  }
+  const measured = raw - effectiveOffset();
+  const entry = window.prompt(`Enter the KNOWN reference angle in degrees (measured ${formatSigned(measured)}).`, '');
+  if (entry === null) return;
+  const trueAngle = Number(entry.trim());
+  const gain = scaleGainFromReference(trueAngle, measured);
+  if (gain === null) {
+    setNotice('Could not derive a plausible scale from that reference. Use a known angle well away from zero.', 'warn');
+    refreshUI();
+    return;
+  }
+  const meta = state.calibrationMeta[state.mode];
+  if (!meta) {
+    setNotice('Zero this mode before capturing a scale reference.', 'warn');
+    refreshUI();
+    return;
+  }
+  state.calibrationMeta[state.mode] = {
+    ...meta,
+    gain: Number(gain.toFixed(4)),
+    gainReference: Number(trueAngle.toFixed(3)),
+    gainTime: new Date().toISOString(),
+  };
+  resetLiveAveraging();
+  saveState();
+  setNotice(`${MODE_LABELS[state.mode]} scale set: gain ${gain.toFixed(3)} from a ${formatSigned(trueAngle)} reference.`, 'good');
+  refreshUI();
+}
+
+function resetScaleCalibration() {
+  const meta = state.calibrationMeta[state.mode];
+  if (meta) {
+    const { gain, gainReference, gainTime, ...rest } = meta;
+    state.calibrationMeta[state.mode] = rest;
+  }
+  resetLiveAveraging();
+  saveState();
+  setNotice(`${MODE_LABELS[state.mode]} scale reset to 1.00 (zero kept).`, 'warn');
+  refreshUI();
+}
+
 function resetCalibration() {
   state.calibrationOffsets[state.mode] = 0;
   state.calibrationMeta[state.mode] = null;
@@ -1455,11 +1542,12 @@ function saveQuickMeasurement() {
     captureCount: state.sampleBuffer.length,
     baselineQuality: null,
     trustVerdict: null,
-    fixtureId: '',
+    // P2-3: stamp the active calibration/orientation context for the delta-mismatch guard.
+    ...currentCalibrationContext(),
   };
 
-  state.measurements = state.measurements.filter(item => !(item.mode === measurement.mode && item.side === measurement.side));
-  state.measurements.push(measurement);
+  // P2-3: commit with rolling history instead of a blind overwrite.
+  commitMeasurement(measurement);
   saveState();
   pauseSensors();
   setSaveConfirmation(`Saved ${MODE_LABELS[state.mode]} · ${state.selectedSide} at ${formatSigned(measurement.value)} with ${measurement.confidence}% confidence.`);
@@ -1500,11 +1588,12 @@ function savePrecisionMeasurement() {
     captureCount: (summary.forward?.count || 0) + (summary.reverse?.count || 0),
     baselineQuality: summary.baseline.label,
     trustVerdict: summary.verdict,
-    fixtureId: state.precisionSession.fixtureId,
+    // P2-3: stamp the active calibration/orientation context (fixtureId comes from the session).
+    ...currentCalibrationContext(),
   };
 
-  state.measurements = state.measurements.filter(item => !(item.mode === measurement.mode && item.side === measurement.side));
-  state.measurements.push(measurement);
+  // P2-3: commit with rolling history instead of a blind overwrite.
+  commitMeasurement(measurement);
   saveState();
   pauseSensors();
   setSaveConfirmation(`Saved precision ${MODE_LABELS[state.mode]} · ${state.selectedSide} at ${formatSigned(measurement.value)} • ${measurement.trustVerdict}.`);
@@ -1602,6 +1691,40 @@ function measurementFor(mode, side) {
   return state.measurements.find(item => item.mode === mode && item.side === side) || null;
 }
 
+// P2-3: the live calibration/orientation context to stamp on a saved reading so a later delta can
+// detect when two corners were captured under mismatched contexts (different zero/gain/pose/device
+// reference/fixture). All gravity/pose-bound, so they reflect what was actually applied to value.
+function currentCalibrationContext() {
+  return {
+    offsetUsed: Number(effectiveOffset().toFixed(3)),
+    gainUsed: Number(effectiveGain().toFixed(4)),
+    orientation: state.screenOrientation,
+    pose: currentPoseOrientation(),
+    deviceRefTime: state.deviceProfile?.time || null,
+    fixtureId: state.precisionSession.fixtureId || '',
+  };
+}
+
+// P2-3: commit a saved reading without blindly discarding the prior one. The previous value (and
+// its time/confidence/band) is pushed onto the new reading's bounded history, then the old record
+// is replaced. So mode+side keeps a small rolling history instead of overwriting to nothing.
+function commitMeasurement(measurement) {
+  const prior = measurementFor(measurement.mode, measurement.side);
+  const priorHistory = Array.isArray(prior?.history) ? prior.history : [];
+  const history = prior
+    ? [...priorHistory, {
+        value: prior.value,
+        time: prior.time,
+        confidence: prior.confidence,
+        toleranceDeg: prior.toleranceDeg,
+        workflow: prior.workflow,
+      }].slice(-MEASUREMENT_HISTORY_DEPTH)
+    : priorHistory.slice(-MEASUREMENT_HISTORY_DEPTH);
+  const stamped = { ...measurement, history };
+  state.measurements = state.measurements.filter(item => !(item.mode === measurement.mode && item.side === measurement.side));
+  state.measurements.push(stamped);
+}
+
 function hasSavedLevelReading() {
   return SIDES.some(side => measurementFor('level', side));
 }
@@ -1611,6 +1734,17 @@ function deltaFor(mode, leftSide, rightSide) {
   const right = measurementFor(mode, rightSide);
   if (!left || !right) return null;
   return left.value - right.value;
+}
+
+// P2-3: was a delta computed across two readings captured under the SAME calibration/orientation
+// context? Returns { ok, reasons[] }; ok is true when either side is missing (nothing to compare)
+// or the contexts match. A mismatch (different zero/gain/pose/device-ref/fixture) means the two
+// numbers are not directly comparable, so the UI warns rather than presenting a misleading delta.
+function deltaContextFor(mode, leftSide, rightSide) {
+  const left = measurementFor(mode, leftSide);
+  const right = measurementFor(mode, rightSide);
+  if (!left || !right) return { ok: true, reasons: [] };
+  return deltaContextMatch(left, right);
 }
 
 function buildElement(tagName, className, text) {
@@ -1800,6 +1934,26 @@ function refreshCalibrationCard() {
   el('cal-value-text').textContent = valueText;
   el('cal-history-text').textContent = historyText;
   el('btn-reset-cal').disabled = !meta;
+
+  // P2-1: surface the two-point scale gain and gate its capture/reset controls.
+  const hasScale = modeHasScale();
+  const gain = meta && Number.isFinite(meta.gain) ? meta.gain : 1;
+  el('cal-scale-text').textContent = hasScale
+    ? `Scale: ${gain.toFixed(3)}× from ${formatSigned(meta.gainReference)} reference${zeroInactive ? ' (inactive)' : ''}`
+    : 'Scale: 1.00× (no scale reference)';
+  // A scale only makes sense once the mode is zeroed in the right pose and a reading is settled.
+  const scaleBtn = el('btn-set-scale');
+  scaleBtn.disabled = state.mode === 'toe' || !state.sensorListenerAttached || !modeIsZeroed() || !state.settled;
+  scaleBtn.title = state.mode === 'toe'
+    ? 'Toe has no sensor reading — a scale reference does not apply.'
+    : (!modeIsZeroed()
+        ? 'Zero this mode in the correct pose before capturing a scale reference.'
+        : (!state.sensorListenerAttached
+            ? 'Tap Start Measuring before capturing a scale reference.'
+            : (state.settled
+                ? 'Hold the phone on a known reference angle, then enter it.'
+                : 'Hold steady on the known angle until it settles, then capture the scale.')));
+  el('btn-reset-scale').disabled = !hasScale;
 }
 
 function refreshPrecisionCard() {
@@ -1829,8 +1983,12 @@ function refreshPrecisionCard() {
     ? `${fixture.reversible ? 'Reversible' : 'Single orientation'} • ${fixture.notes || 'No notes'}`
     : 'Use a rigid, reversible jig if possible.';
   el('baseline-status').textContent = baseline.label;
+  // P2-2: flag a non-coplanar baseline (a corner off the fitted plane) with the worst residual so
+  // a bad/mis-placed datum is visible rather than silently averaged into the deltas.
   el('baseline-status-sub').textContent = baseline.complete
-    ? `Front ${formatSigned(baseline.frontRearDelta || 0)} • Left ${formatSigned(baseline.leftRightDelta || 0)}`
+    ? (baseline.planeCoplanar === false
+        ? `Non-coplanar datum — worst corner off plane ${formatSigned(baseline.planeMaxResidual || 0)}. Re-capture the outlier.`
+        : `Front ${formatSigned(baseline.frontRearDelta || 0)} • Left ${formatSigned(baseline.leftRightDelta || 0)}`)
     : `${baseline.completedSides}/4 points captured in Level mode.`;
   el('precision-trust-status').textContent = summary.verdict;
   // P1-4 / P1-5: surface n and the +/- band next to the verdict.
@@ -2079,8 +2237,19 @@ function refreshSavedReadings() {
     el('front-delta-note').textContent = 'Not a toe value — measure toe geometrically (rim offset / rim length).';
     el('rear-delta-note').textContent = 'Not a toe value — measure toe geometrically (rim offset / rim length).';
   } else {
-    el('front-delta-note').textContent = frontDelta === null ? 'Save both front sides for this mode.' : 'A negative delta means FL is smaller than FR.';
-    el('rear-delta-note').textContent = rearDelta === null ? 'Save both rear sides for this mode.' : 'A negative delta means RL is smaller than RR.';
+    // P2-3: warn when a delta is computed across mismatched calibration/orientation contexts.
+    const frontContext = deltaContextFor(state.mode, 'FL', 'FR');
+    const rearContext = deltaContextFor(state.mode, 'RL', 'RR');
+    el('front-delta-note').textContent = frontDelta === null
+      ? 'Save both front sides for this mode.'
+      : (frontContext.ok
+          ? 'A negative delta means FL is smaller than FR.'
+          : `Delta context mismatch (${frontContext.reasons.join(', ')}) — re-capture FL/FR under one calibration.`);
+    el('rear-delta-note').textContent = rearDelta === null
+      ? 'Save both rear sides for this mode.'
+      : (rearContext.ok
+          ? 'A negative delta means RL is smaller than RR.'
+          : `Delta context mismatch (${rearContext.reasons.join(', ')}) — re-capture RL/RR under one calibration.`);
   }
 
   const list = el('saved-list');
@@ -2122,11 +2291,26 @@ function refreshSavedReadings() {
   });
 }
 
+// P2-4: human-readable heading-trust status for the advanced panel. Raw alpha is never a yaw
+// reference; only a trusted absolute compass heading is usable, and indoor distortion is called out.
+function headingStatusText() {
+  if (state.headingTrusted && Number.isFinite(state.heading)) {
+    const acc = Number.isFinite(state.headingAccuracy) ? ` ±${formatNumber(state.headingAccuracy)}°` : '';
+    return `${formatNumber(state.heading)}°${acc} (trusted)`;
+  }
+  if (state.headingReason === 'poor-accuracy') return 'Not trusted — indoor magnetic distortion';
+  if (state.headingReason === 'no-heading') return 'Not trusted — absolute alpha, no compass';
+  if (state.headingReason === 'relative') return 'Not trusted — heading is relative';
+  return 'Not trusted — no heading';
+}
+
 function refreshAdvanced() {
   el('raw-alpha').textContent = `${formatNumber(state.alpha)}°`;
   el('raw-beta').textContent = `${formatNumber(state.beta)}°`;
   el('raw-gamma').textContent = `${formatNumber(state.gamma)}°`;
   el('sample-spread').textContent = `${formatNumber(sampleRange())}° range • ${formatNumber(sampleStdDev())}° σ`;
+  // P2-4: surface compass/heading trust so squareness/toe work never silently uses raw alpha.
+  el('heading-trust').textContent = headingStatusText();
 
   const list = el('mode-cal-list');
   list.textContent = '';
@@ -2214,6 +2398,8 @@ function setupEventHandlers() {
       resetFlipSelfTest: () => resetFlipSelfTest(),
       savePrecisionMeasurement: () => savePrecisionMeasurement(),
       calibrate: () => calibrate(),
+      calibrateScale: () => calibrateScale(),
+      resetScaleCalibration: () => resetScaleCalibration(),
       saveMeasurement: () => saveMeasurement(),
       resetCalibration: () => resetCalibration(),
       selectSide: () => selectSide(arg),
