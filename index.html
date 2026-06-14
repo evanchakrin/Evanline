@@ -9,7 +9,7 @@
   <meta name="theme-color" content="#0d1117" />
   <link rel="manifest" href="manifest.json" />
   <title>Evanline – Wheel Alignment</title>
-    <link rel="stylesheet" href="assets/css/styles.css?v=8" />
+    <link rel="stylesheet" href="assets/css/styles.css?v=11" />
 
 </head>
 <body>
@@ -91,7 +91,7 @@
   <div class="mode-tabs" role="tablist" aria-label="Measurement mode selection">
     <button class="mode-tab active" data-mode="level" data-action="setMode" data-arg="level" role="tab" aria-selected="true">Level</button>
     <button class="mode-tab" data-mode="camber" data-action="setMode" data-arg="camber" role="tab" aria-selected="false">Camber</button>
-    <button class="mode-tab" data-mode="toe" data-action="setMode" data-arg="toe" role="tab" aria-selected="false">Toe</button>
+    <button class="mode-tab" data-mode="toe" data-action="setMode" data-arg="toe" role="tab" aria-selected="false" title="Toe is geometric, not a sensor reading">Toe*</button>
     <button class="mode-tab" data-mode="pitch" data-action="setMode" data-arg="pitch" role="tab" aria-selected="false">Pitch</button>
   </div>
 
@@ -226,6 +226,29 @@
     </details>
 
     <details class="panel-section">
+      <summary>Trueness self-test (180° flip)</summary>
+      <div class="panel-section-content">
+        <p class="fixture-meta" id="self-test-desc">Read once, flip the phone 180° about the measurement axis, read again. A healthy inclinometer reads equal-and-opposite, so the residual bias (a+b)/2 should be near zero. Run this before trusting a precision save.</p>
+        <div class="comparison-grid">
+          <div class="comparison-item">
+            <span>Self-test status</span>
+            <strong id="self-test-status">Not run</strong>
+            <small id="self-test-sub">Capture reading A to begin.</small>
+          </div>
+          <div class="comparison-item">
+            <span>Residual bias</span>
+            <strong id="self-test-bias">—</strong>
+            <small id="self-test-bias-sub">Asymmetry |a + b| should be small.</small>
+          </div>
+        </div>
+        <div class="precision-action-row">
+          <button class="btn btn-surface btn-small" id="btn-self-test" data-action="runFlipSelfTest">Capture self-test reading</button>
+          <button class="btn btn-surface btn-small" data-action="resetFlipSelfTest">Reset self-test</button>
+        </div>
+      </div>
+    </details>
+
+    <details class="panel-section">
       <summary>Report details</summary>
       <div class="panel-section-content">
         <div class="precision-grid">
@@ -256,6 +279,11 @@
 
   <div class="gauge-card">
     <span class="gauge-label" id="gauge-mode-label">Camber Angle</span>
+
+    <div class="mode-explainer hidden-panel" id="toe-explainer" role="status" aria-live="polite">
+      <strong>Toe is not a sensor reading.</strong>
+      <span>A phone is blind to rotation about vertical and has no vehicle centerline, so it cannot measure toe. Measure it geometrically: toe ≈ atan(front-vs-rear rim offset / rim length), or use string lines / turn plates. The gauge below is parked at 0° in this mode.</span>
+    </div>
 
     <svg id="gauge-svg" viewBox="0 0 300 180" xmlns="http://www.w3.org/2000/svg">
       <defs>
@@ -347,8 +375,13 @@
       <span class="cal-title">Calibration Offset</span>
       <span class="cal-value" id="cal-value-text">None — tap Zero This Mode to calibrate</span>
       <span class="cal-history" id="cal-history-text">Saved locally per mode.</span>
+      <span class="cal-history" id="cal-scale-text">Scale: 1.00× (no scale reference)</span>
     </div>
-    <button class="btn btn-ghost btn-small" data-action="calibrate">Set</button>
+    <div class="cal-actions">
+      <button class="btn btn-ghost btn-small" data-action="calibrate">Set zero</button>
+      <button class="btn btn-ghost btn-small" id="btn-set-scale" data-action="calibrateScale" title="Hold the phone on a KNOWN reference angle, then enter it to scale readings.">Set scale</button>
+      <button class="btn btn-ghost btn-small" id="btn-reset-scale" data-action="resetScaleCalibration" title="Reset the scale gain to 1.00 (keeps the zero).">Reset scale</button>
+    </div>
   </div>
 
   <div class="gauge-card">
@@ -404,6 +437,10 @@
           <span class="advanced-label">Sample spread</span>
           <strong class="advanced-value" id="sample-spread">—</strong>
         </div>
+        <div class="advanced-item">
+          <span class="advanced-label">Heading</span>
+          <strong class="advanced-value" id="heading-trust">—</strong>
+        </div>
       </div>
       <div class="mode-cal-list" id="mode-cal-list"></div>
     </div>
@@ -423,8 +460,8 @@
       <p>Quick mode still works for fast checks. For best repeatability, switch to Precision, use a rigid jig, capture a Level baseline around the car, then take repeated forward and reversed readings before saving camber.</p>
     </div>
     <div class="mode-card">
-      <h4>Toe</h4>
-      <p>Use a straight edge or known straight-ahead reference first. Precision mode keeps that reference inside a shared session so the same fixture, baseline, and reversal workflow can be reused left-to-right.</p>
+      <h4>Toe (experimental)</h4>
+      <p><strong>The phone cannot measure toe.</strong> A gravity sensor is blind to rotation about the vertical axis, and toe needs a vehicle-centerline reference the app never captures. Measure toe <em>geometrically</em> instead: clamp a straight edge or known length across each rim, measure the front-vs-rear offset, and compute toe ≈ atan(offset / rim length). String lines pulled parallel to the thrust line or a pair of turn plates give the same result. Use the other modes (camber, level, pitch) for real sensor readings.</p>
     </div>
     <div class="mode-card">
       <h4>Level</h4>
@@ -433,6 +470,31 @@
     <div class="mode-card">
       <h4>Pitch</h4>
       <p>Pitch remains available, but the precision workflow prioritizes repeatable camber, toe, and baseline setup first. Use it to spot front/rear attitude changes inside the same session.</p>
+    </div>
+  </div>
+
+  <p class="instr-section-title">Physical placement</p>
+  <div class="step-list">
+    <div class="step-item">
+      <div class="step-num">C</div>
+      <div class="step-body">
+        <span class="step-title">Camber — register to the wheel FACE</span>
+        <span class="step-desc">Hold the phone flat against the machined wheel <strong>face</strong>, clear of the curved outer lip and any decorative or raised spokes. Wheel-face camber is <strong>not</strong> the same as tire camber — register to the same hard, flat datum on every corner so left/right deltas are comparable.</span>
+      </div>
+    </div>
+    <div class="step-item">
+      <div class="step-num">L</div>
+      <div class="step-body">
+        <span class="step-title">Level &amp; Pitch — use a fixed body datum</span>
+        <span class="step-desc">Place the phone flat on a repeatable, rigid body datum (a flat sill, a hub face, the same roof spot, or a chassis rail) — not on flexible trim. Re-use the exact same surface for every reading so the plane reference stays consistent.</span>
+      </div>
+    </div>
+    <div class="step-item">
+      <div class="step-num step-num-warn">T</div>
+      <div class="step-body">
+        <span class="step-title">Toe — geometric method only</span>
+        <span class="step-desc">Do not try to read toe from phone tilt. Measure the front-vs-rear rim offset with a string line, turn plates, or a straight edge, then compute toe ≈ atan(offset / rim length).</span>
+      </div>
     </div>
   </div>
 
@@ -503,7 +565,7 @@
   <div class="instr-spacer"></div>
 </div>
 
-<script type="module" src="assets/js/app.js?v=8"></script>
+<script type="module" src="assets/js/app.js?v=11"></script>
 
 <dialog id="fixture-dialog" class="fixture-dialog" aria-labelledby="fixture-dialog-title">
   <form method="dialog" id="fixture-form" class="fixture-form">

@@ -367,6 +367,21 @@
       background: rgba(63, 185, 80, 0.12);
       border-color: rgba(63, 185, 80, 0.4);
     }
+    .mode-explainer {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      border-radius: 12px;
+      padding: 12px;
+      margin-bottom: 12px;
+      border: 1px solid rgba(210, 153, 34, 0.45);
+      background: rgba(210, 153, 34, 0.12);
+      color: var(--text);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .mode-explainer strong { color: var(--yellow); font-size: 13px; }
 
     #gauge-svg {
       width: 100%;
