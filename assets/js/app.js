@@ -1,6 +1,7 @@
 import {
   average,
   buildArcPath,
+  calibrationZeroValid,
   captureSeriesStats,
   clampAngle as clampAngleInRange,
   computeSampleQuality,
@@ -8,6 +9,9 @@ import {
   inclinationForMode,
   motionIsQuasiStatic,
   polarPoint,
+  poseOkForMode,
+  poseOrientation,
+  preferredOrientationForMode,
   standardDeviation,
 } from './domain.js';
 import {
@@ -140,7 +144,10 @@ const state = {
   selectedSide: 'FL',
   measurements: [],
   screenOrientation: 'portrait',
+  // P0-4: orientationOk now reflects PHYSICAL pose (gravity-derived), not screen aspect ratio.
+  // It is advisory only — a confidence penalty + non-blocking warning, never a settle gate.
   orientationOk: true,
+  poseOk: true,
   notice: null,
   lastSaveConfirmation: null,
   liveRefreshScheduled: false,
@@ -430,12 +437,21 @@ function precisionSummary(mode = state.mode, side = state.selectedSide) {
   });
 }
 
+// Screen aspect ratio. P0-4: this is now only a SECONDARY hint (display label, fallback when
+// gravity is unavailable) — physical pose drives the real orientation/pose checks below.
 function currentOrientation() {
   return window.innerWidth > window.innerHeight ? 'landscape' : 'portrait';
 }
 
+// P0-4 / P1-3a: the live orientation family derived from PHYSICAL pose (gravity), falling back
+// to the screen aspect ratio only when no gravity vector is available. Used for the pose hint
+// and for binding a stored zero to the pose it was captured in.
+function currentPoseOrientation() {
+  return poseOrientation(gravityForAngle()) || currentOrientation();
+}
+
 function preferredOrientation(mode = state.mode) {
-  return (mode === 'camber' || mode === 'toe') ? 'portrait' : 'landscape';
+  return preferredOrientationForMode(mode);
 }
 
 function orientationLabel(value) {
@@ -462,28 +478,68 @@ function gravityForAngle(useRaw = false) {
   return gravityFromEuler(state.smoothed);
 }
 
+// P0-4: refresh the orientation/pose state from PHYSICAL pose. screenOrientation keeps the
+// screen aspect ratio as a display label/secondary hint, but orientationOk/poseOk are derived
+// from the gravity vector so a settle is never blocked by aspect ratio. poseOk is advisory.
+function updateOrientationPose() {
+  state.screenOrientation = currentOrientation();
+  state.poseOk = poseOkForMode(state.mode, gravityForAngle());
+  state.orientationOk = state.poseOk;
+}
+
 function rawAngleForMode(mode = state.mode, useRaw = false) {
   const gravity = gravityForAngle(useRaw);
   const angle = inclinationForMode(mode, gravity);
-  // The bias subtraction shape from the Euler era is preserved (a later stage fixes it),
-  // but it now applies in the ANGLE domain rather than to a single raw Euler axis.
-  const deviceBias = mode === 'pitch'
-    ? (state.deviceProfile?.axisBias?.beta || 0)
-    : (state.deviceProfile?.axisBias?.gamma || 0);
-  return Number.isFinite(angle) ? angle - deviceBias : null;
+  // P1-3b: the global device-bias subtraction is GONE. Previously calibrate() stored `raw`
+  // (already bias-subtracted) and calibratedAngle() subtracted that offset again, so the bias
+  // cancelled to a no-op for any zeroed mode while silently shifting only un-zeroed modes — a
+  // contradiction. We pick the roadmap's "drop" mechanism: per-mode zeros are the sole zero
+  // reference. captureDeviceCalibration still records axisBias for the (later) staleness/scale
+  // features, but it no longer feeds the live angle, so it can never produce that silent shift.
+  return Number.isFinite(angle) ? angle : null;
+}
+
+// P1-3a: a stored per-mode zero is only valid when its capture orientation matches the mode's
+// preferred family AND the phone is currently posed in that same family. Returns true when the
+// stored zero may be applied; false treats the mode as NOT zeroed (the "Zero this mode"
+// guidance surfaces) rather than silently applying an offset taken in the wrong pose.
+function zeroValidForCurrentPose(mode = state.mode) {
+  return calibrationZeroValid(mode, state.calibrationMeta[mode], currentPoseOrientation());
+}
+
+// P1-3a: the offset to subtract, bound to orientation/pose. When the stored zero does not
+// match the current pose family it is discarded (offset 0) so the mode reads as un-zeroed.
+function effectiveOffset(mode = state.mode) {
+  return zeroValidForCurrentPose(mode) ? (state.calibrationOffsets[mode] || 0) : 0;
+}
+
+// P1-3a: "is this mode effectively zeroed RIGHT NOW?" — a stored zero captured in the wrong
+// orientation family (or while the phone is currently posed in the wrong family) counts as
+// not zeroed, so the workflow re-surfaces the "Zero this mode" guidance instead of trusting
+// a mismatched offset. Display surfaces still read state.calibrationMeta directly so the user
+// can see a stored-but-inactive zero and why it is being ignored.
+function modeIsZeroed(mode = state.mode) {
+  return zeroValidForCurrentPose(mode);
+}
+
+// P1-3a: a stored zero exists for this mode but does not match the current pose/orientation,
+// so it is being ignored. Drives a clarifying hint in the calibration card/chip.
+function modeZeroOrientationMismatch(mode = state.mode) {
+  return !!state.calibrationMeta[mode] && !zeroValidForCurrentPose(mode);
 }
 
 function calibratedAngle(mode = state.mode) {
   // Subtracts a constant from a physically true (gravity-derived) angle. Returns null
   // when the underlying gravity-vector angle is unavailable (e.g. toe, or no sensor yet).
+  // P1-3a: the offset is only applied when the stored zero matches the current pose family.
   const raw = rawAngleForMode(mode);
-  return raw === null ? null : raw - (state.calibrationOffsets[mode] || 0);
+  return raw === null ? null : raw - effectiveOffset(mode);
 }
 
 // P0-3: the un-smoothed calibrated angle that feeds rawSampleBuffer (stability/drift/conf).
 function rawCalibratedAngle(mode = state.mode) {
   const raw = rawAngleForMode(mode, true);
-  return raw === null ? null : raw - (state.calibrationOffsets[mode] || 0);
+  return raw === null ? null : raw - effectiveOffset(mode);
 }
 
 function sampleAverage() {
@@ -561,8 +617,10 @@ function updateSampleQuality() {
   // the tolerance N_eff ~= N so smoothingAlpha stays 0 here.
   const result = computeSampleQuality({
     sampleBuffer: state.rawSampleBuffer,
-    orientationOk: state.orientationOk,
-    calibrationSet: !!state.calibrationMeta[state.mode],
+    // P0-4: orientationOk is the physical-pose hint (confidence penalty only, not a gate).
+    orientationOk: state.poseOk,
+    // P1-3a: an orientation-mismatched zero counts as not set for confidence purposes.
+    calibrationSet: modeIsZeroed(),
     now,
     settledStart: state.settledStart,
     alignedStart: state.alignedStart,
@@ -833,9 +891,9 @@ function onOrientation(event) {
     state.smoothed[axis] = prev === null ? next : prev + (next - prev) * SMOOTHING_ALPHA;
   });
 
-  state.screenOrientation = currentOrientation();
-  state.orientationOk = state.screenOrientation === preferredOrientation();
   state.gravityFresh = gravityIsFresh();
+  // P0-4: refresh the physical-pose hint (gravity-based), not the screen aspect ratio.
+  updateOrientationPose();
   // P1-6: orientation events keep the stream alive too.
   state.lastSensorEventTime = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
   state.lastSensorWallTime = Date.now();
@@ -1062,8 +1120,7 @@ function resetPrecisionSession() {
 
 function setMode(mode) {
   state.mode = mode;
-  state.screenOrientation = currentOrientation();
-  state.orientationOk = state.screenOrientation === preferredOrientation(mode);
+  updateOrientationPose();
   resetLiveAveraging();
   document.querySelectorAll('.mode-tab').forEach(tab => {
     tab.classList.toggle('active', tab.dataset.mode === mode);
@@ -1089,7 +1146,9 @@ function captureDeviceCalibration() {
   };
   resetLiveAveraging();
   saveState();
-  setNotice('Device reference captured and applied across modes.', 'good');
+  // P1-3b: the device reference is now INFORMATIONAL. Per-mode zeros are the sole live zero, so
+  // this captured bias no longer shifts readings — it is recorded for staleness/scale features.
+  setNotice('Device reference recorded (informational). Per-mode zeros remain the live reference.', 'good');
   refreshUI();
 }
 
@@ -1113,15 +1172,24 @@ function calibrate() {
     refreshUI();
     return;
   }
+  // P1-3a: bind the zero to the PHYSICAL pose it was captured in (gravity-derived), so the
+  // stored orientation matches the family the calibration-validity check enforces later.
+  const captureOrientation = currentPoseOrientation();
   state.calibrationOffsets[state.mode] = raw;
   state.calibrationMeta[state.mode] = {
     offset: raw,
     time: new Date().toISOString(),
-    orientation: state.screenOrientation,
+    orientation: captureOrientation,
   };
   resetLiveAveraging();
   saveState();
-  setNotice(`${MODE_LABELS[state.mode]} set to zero and saved locally.`, 'good');
+  // P1-3a: warn if the user zeroed out of the mode's preferred pose — the offset will be parked
+  // inactive until they re-zero in the right pose, so flag it now rather than silently storing it.
+  if (captureOrientation !== preferredOrientation()) {
+    setNotice(`${MODE_LABELS[state.mode]} zero captured in ${orientationLabel(captureOrientation)} pose — re-zero in ${MODE_GUIDES[state.mode].orientation} pose to apply it.`, 'warn');
+  } else {
+    setNotice(`${MODE_LABELS[state.mode]} set to zero and saved locally.`, 'good');
+  }
   refreshUI();
 }
 
@@ -1178,12 +1246,20 @@ function guideActionState() {
   if (!(state.calibrationMeta.level || hasSavedLevelReading()) && state.mode !== 'level') {
     return { label: 'Switch to Level first', action: 'setModeLevel', reason: 'Level mode prepares a trustworthy baseline.' };
   }
-  if (!state.calibrationMeta[state.mode]) {
-    return { label: 'Zero this mode', action: 'calibrate', reason: `${MODE_LABELS[state.mode]} is not zeroed yet.` };
+  if (!modeIsZeroed()) {
+    // P1-3a: an orientation-mismatched zero re-surfaces this step. The reason explains that the
+    // stored zero is being ignored because it was captured in the wrong pose family.
+    return {
+      label: 'Zero this mode',
+      action: 'calibrate',
+      reason: modeZeroOrientationMismatch()
+        ? `${MODE_LABELS[state.mode]} zero was captured in ${orientationLabel(state.calibrationMeta[state.mode].orientation)} — re-zero in ${guide.orientation} pose.`
+        : `${MODE_LABELS[state.mode]} is not zeroed yet.`,
+    };
   }
-  if (!state.orientationOk) {
-    return { label: `Rotate to ${guide.orientation}`, action: 'none', reason: `Current orientation is ${orientationLabel(state.screenOrientation)}.` };
-  }
+  // P0-4: pose mismatch is a non-blocking hint, NOT a guide dead-end. We no longer short-circuit
+  // the workflow with a `Rotate to...` step; the pose warning is surfaced in the guide card and
+  // the orientation chip instead, and the flow proceeds to capture/settle/save.
   if (state.workflow === 'precision' && !(precision.forward && precision.forward.count)) {
     return {
       label: state.settled ? 'Capture forward' : 'Hold steady for forward',
@@ -1432,11 +1508,12 @@ function refreshGuide() {
     selectedSide: state.selectedSide,
     deviceProfileSet: !!state.deviceProfile,
     fixtureSelected: !!activeFixture(),
-    calibrationSet: !!state.calibrationMeta[state.mode],
+    // P1-3a: a zero captured in the wrong orientation family is treated as not set here too.
+    calibrationSet: modeIsZeroed(),
     levelPrepared: !!(state.calibrationMeta.level || hasSavedLevelReading()),
-    orientationOk: state.orientationOk,
-    screenOrientationLabel: orientationLabel(state.screenOrientation),
-    preferredOrientationLabel: guide.orientation,
+    // P0-4: physical-pose hint (non-blocking) instead of the old aspect-ratio orientation gate.
+    orientationOk: state.poseOk,
+    poseFamilyLabel: guide.orientation,
     settled: state.settled,
     baseline: precision.baseline,
     precision,
@@ -1516,7 +1593,10 @@ function refreshStatus() {
             : (!state.rawSampleBuffer.length
                 ? 'Need motion samples'
                 : `${state.rawSampleBuffer.length}/${SAMPLE_WINDOW} samples • spread ${formatNumber(range)}°`)));
-  const orientationText = `${orientationLabel(state.screenOrientation)} ${state.orientationOk ? '✓' : '✕'}`;
+  // P0-4: the orientation chip now reports PHYSICAL pose (in-pose vs wrong pose), derived from
+  // gravity, rather than the screen aspect ratio. It is a hint, so a mismatch shows a cross
+  // without blocking anything downstream.
+  const orientationText = state.poseOk ? 'In pose ✓' : 'Wrong pose ✕';
 
   el('chip-stability').textContent = stabilityValue;
   el('chip-stability-sub').textContent = stabilitySub;
@@ -1528,10 +1608,16 @@ function refreshStatus() {
     ? `${state.confidence}% • σ ${formatNumber(stdDev)}° • raw live feed`
     : 'Start Measuring to refresh confidence';
   el('chip-orientation').textContent = orientationText;
-  el('chip-orientation-sub').textContent = `Preferred for ${state.mode}: ${MODE_GUIDES[state.mode].orientation}`;
+  el('chip-orientation-sub').textContent = state.poseOk
+    ? `${MODE_GUIDES[state.mode].orientation} pose for ${state.mode}`
+    : `Hold the phone in ${MODE_GUIDES[state.mode].orientation} pose for ${state.mode}`;
+  // P1-3a: a stored zero captured in the wrong orientation family is shown but flagged inactive.
+  const zeroInactive = modeZeroOrientationMismatch();
   el('chip-calibration').textContent = calMeta ? formatSigned(calMeta.offset) : 'Not set';
   el('chip-calibration-sub').textContent = calMeta
-    ? `Zeroed ${formatTime(calMeta.time)} • ${orientationLabel(calMeta.orientation)}`
+    ? (zeroInactive
+        ? `Ignored — zeroed in ${orientationLabel(calMeta.orientation)}, re-zero in ${MODE_GUIDES[state.mode].orientation}`
+        : `Zeroed ${formatTime(calMeta.time)} • ${orientationLabel(calMeta.orientation)}`)
     : 'Zero this mode first';
 }
 
@@ -1566,11 +1652,16 @@ function refreshGauge() {
 
 function refreshCalibrationCard() {
   const meta = state.calibrationMeta[state.mode];
+  // P1-3a: flag a stored zero that is being ignored because it was captured in the wrong
+  // orientation family for this mode (so it is not silently applied to a mismatched pose).
+  const zeroInactive = modeZeroOrientationMismatch();
   const valueText = meta
-    ? `Offset ${formatSigned(meta.offset)} for ${MODE_LABELS[state.mode]}`
+    ? `Offset ${formatSigned(meta.offset)} for ${MODE_LABELS[state.mode]}${zeroInactive ? ' (inactive)' : ''}`
     : 'None — tap Zero This Mode to calibrate';
   const historyText = meta
-    ? `Last set ${formatTime(meta.time)} in ${orientationLabel(meta.orientation)}. Stored locally per mode.`
+    ? (zeroInactive
+        ? `Captured in ${orientationLabel(meta.orientation)} — ignored until re-zeroed in ${MODE_GUIDES[state.mode].orientation} pose.`
+        : `Last set ${formatTime(meta.time)} in ${orientationLabel(meta.orientation)}. Stored locally per mode.`)
     : 'Saved locally per mode.';
 
   el('cal-value-text').textContent = valueText;
@@ -1591,13 +1682,15 @@ function refreshPrecisionCard() {
     : 'Use repeated settled captures with the same fixture profile, then add reversed captures if the jig supports it.';
 
   // P1-6: warn when the saved device reference is older than the staleness window.
+  // P1-3b: the reference is informational only now (per-mode zeros are the live zero), so the
+  // status/sub copy says "Recorded"/"Informational" rather than implying it shifts readings.
   const deviceStale = deviceProfileIsStale();
-  el('device-profile-status').textContent = state.deviceProfile ? (deviceStale ? 'Stale' : 'Ready') : 'Not set';
+  el('device-profile-status').textContent = state.deviceProfile ? (deviceStale ? 'Stale' : 'Recorded') : 'Not set';
   el('device-profile-sub').textContent = state.deviceProfile
     ? (deviceStale
-        ? `Reference set ${formatTime(state.deviceProfile.time)} is stale — re-capture before trusting it.`
-        : `${state.deviceProfile.label} • β ${formatSigned(state.deviceProfile.axisBias.beta)} • γ ${formatSigned(state.deviceProfile.axisBias.gamma)}`)
-    : 'Capture on a trusted flat or vertical reference.';
+        ? `Reference set ${formatTime(state.deviceProfile.time)} is stale — re-capture to refresh the record.`
+        : `Informational • ${state.deviceProfile.label} • β ${formatSigned(state.deviceProfile.axisBias.beta)} • γ ${formatSigned(state.deviceProfile.axisBias.gamma)}`)
+    : 'Capture on a trusted flat or vertical reference (informational).';
   el('fixture-status').textContent = fixture ? fixture.name : 'Not set';
   el('fixture-status-sub').textContent = fixture
     ? `${fixture.reversible ? 'Reversible' : 'Single orientation'} • ${fixture.notes || 'No notes'}`
@@ -1861,8 +1954,7 @@ function refreshAdvanced() {
 }
 
 function refreshUI() {
-  state.screenOrientation = currentOrientation();
-  state.orientationOk = state.screenOrientation === preferredOrientation();
+  updateOrientationPose();
   refreshWorkflowMode();
   refreshGuide();
   refreshReadiness();
@@ -1880,8 +1972,7 @@ function refreshUI() {
 }
 
 function refreshLiveUI() {
-  state.screenOrientation = currentOrientation();
-  state.orientationOk = state.screenOrientation === preferredOrientation();
+  updateOrientationPose();
   refreshGuide();
   refreshReadiness();
   refreshGauge();

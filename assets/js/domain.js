@@ -53,6 +53,58 @@ export function inclinationForMode(mode, g) {
   return camberDeg(g);
 }
 
+// P0-4: physical-pose family for a mode, derived from where gravity is expected to point
+// in the device frame (NOT the screen aspect ratio). Camber/toe are read with the phone
+// upright (gravity along ±y); level/pitch are read with the phone flat (gravity along ±z).
+export function poseFamilyForMode(mode) {
+  return (mode === 'camber' || mode === 'toe') ? 'upright' : 'flat';
+}
+
+// P0-4: is the phone in the right PHYSICAL pose for this mode? Replaces the old aspect-ratio
+// orientation gate. Compares the gravity direction against the family's reference axis:
+// 'upright' expects gravity dominated by ±y, 'flat' expects ±z. The tolerance is generous
+// (default 45°) so a phone tilted by a normal measurement angle still counts as in-pose; it
+// only fails when the phone is in the wrong family entirely (e.g. flat while in camber mode).
+// Returns true when gravity is missing/zero so it never blocks the pure-Euler fallback, and
+// this result is advisory only (a hint/confidence penalty), never a hard settle gate.
+export function poseOkForMode(mode, g, toleranceDeg = 45) {
+  if (!finiteGravity(g)) return true;
+  const magnitude = Math.hypot(g.x, g.y, g.z);
+  if (!(magnitude > 0)) return true;
+  const referenceComponent = poseFamilyForMode(mode) === 'upright' ? g.y : g.z;
+  const tiltFromReference = Math.acos(clamp(Math.abs(referenceComponent) / magnitude, 0, 1)) * 180 / Math.PI;
+  return tiltFromReference <= toleranceDeg;
+}
+
+// P1-3a: the screen-orientation family a mode's zero must be captured in. Camber/toe are
+// portrait-family (phone upright), level/pitch landscape-family (phone flat). Mirrors the
+// pose family but in the screen-orientation vocabulary stored on calibrationMeta.
+export function preferredOrientationForMode(mode) {
+  return poseFamilyForMode(mode) === 'upright' ? 'portrait' : 'landscape';
+}
+
+// P0-4 / P1-3a: derive the orientation family from the PHYSICAL pose (gravity), not the screen
+// aspect ratio. Upright phones (gravity along ±y) read as 'portrait', flat phones (gravity
+// along ±z) as 'landscape'. Returns null when gravity is missing so callers can fall back to a
+// screen hint. The y-vs-z dominance split is the physical equivalent of the family check.
+export function poseOrientation(g) {
+  if (!finiteGravity(g)) return null;
+  return Math.abs(g.y) >= Math.abs(g.z) ? 'portrait' : 'landscape';
+}
+
+// P1-3a: a stored per-mode zero is only valid if it was captured in the mode's preferred
+// orientation family. A zero captured in the wrong family (e.g. camber zeroed in landscape)
+// is discarded so we never silently apply an offset taken in an incompatible pose. Returns
+// false when no calibration is stored. Pass currentOrientation to ALSO require the live
+// orientation to match the mode's family (the phone is physically posed for this mode now).
+export function calibrationZeroValid(mode, calibrationMeta, currentOrientation = null) {
+  if (!calibrationMeta || !Number.isFinite(calibrationMeta.offset)) return false;
+  const expected = preferredOrientationForMode(mode);
+  if (calibrationMeta.orientation !== expected) return false;
+  if (currentOrientation !== null && currentOrientation !== expected) return false;
+  return true;
+}
+
 export function clampAngle(value, range) {
   return clamp(value, -range, range);
 }
@@ -119,6 +171,8 @@ export function toleranceHalfWidth({ stdDev, sampleCount, k = 2, smoothingAlpha 
 
 export function computeSampleQuality({
   sampleBuffer = [],
+  // P0-4: now a physical-pose hint (is the phone in the right pose family for the mode?).
+  // It only drives the confidence penalty and an advisory warning — never the settle gate.
   orientationOk,
   calibrationSet,
   now,
@@ -156,7 +210,10 @@ export function computeSampleQuality({
   const drift = bufferDrift(sampleBuffer);
   const enoughSamples = sampleBuffer.length >= minSampleCount;
   const dispersionOk = range <= settledRange && stdDev <= settledStdDev && drift <= driftTol;
-  const stableNow = enoughSamples && dispersionOk && orientationOk && readingOk && motionOk && streamOk;
+  // P0-4: orientationOk is now a physical-pose hint, NOT a hard gate. A pose mismatch only
+  // costs confidence (below) and surfaces a non-blocking warning in the guide/chips — it must
+  // not prevent a settle, so it is intentionally absent from stableNow.
+  const stableNow = enoughSamples && dispersionOk && readingOk && motionOk && streamOk;
   const toleranceDeg = toleranceHalfWidth({ stdDev, sampleCount: sampleBuffer.length, smoothingAlpha });
 
   let confidence = Math.round(maxConfidenceBase - (range * rangePenalty) - (stdDev * stdDevPenalty));
@@ -194,6 +251,8 @@ export function computeSampleQuality({
     readingOk,
     motionOk,
     streamOk,
+    // P0-4: echoed back so the UI can render the pose hint, even though it no longer gates.
+    orientationOk: !!orientationOk,
     confidence,
     settled,
     aligned,

@@ -26,9 +26,9 @@ function baseGuideInputs(overrides = {}) {
     fixtureSelected: false,
     calibrationSet: true,
     levelPrepared: true,
+    // P0-4: orientationOk is the physical-pose hint; poseFamilyLabel names the expected pose.
     orientationOk: true,
-    screenOrientationLabel: 'Portrait',
-    preferredOrientationLabel: 'Portrait',
+    poseFamilyLabel: 'Portrait',
     settled: true,
     baseline: { complete: false, completedSides: 0, label: 'Incomplete' },
     precision: { forward: null, reverse: null, needsReverse: false, verdict: 'Need more captures', repeatabilityScore: 50 },
@@ -160,6 +160,31 @@ test('computeGuideState reaches the save step once everything is satisfied', () 
   }));
   assert.match(result.title, /Save the averaged reading/);
   assert.equal(result.tone, 'good');
+});
+
+test('computeGuideState keeps a pose mismatch non-blocking (P0-4)', () => {
+  // A pose mismatch must NOT preempt the settle/save flow; it only appends a warning and
+  // downgrades a 'good' tone to 'warn'. The user can still reach (and act on) the save step.
+  const result = computeGuideState(baseGuideInputs({
+    settled: true,
+    workflow: 'quick',
+    orientationOk: false,
+  }));
+  assert.match(result.title, /Save the averaged reading/);
+  assert.match(result.warning, /not in the .* pose/i);
+  assert.equal(result.tone, 'warn');
+});
+
+test('computeGuideState appends the pose hint while still settling (P0-4)', () => {
+  // Even before settling, the pose hint rides along with the Hold-steady step rather than
+  // replacing it with a blocking "Rotate" step.
+  const result = computeGuideState(baseGuideInputs({
+    settled: false,
+    workflow: 'quick',
+    orientationOk: false,
+  }));
+  assert.match(result.title, /Hold steady/);
+  assert.match(result.warning, /not in the .* pose/i);
 });
 
 test('PRECISION_CONSTANTS keep the documented quality thresholds', () => {

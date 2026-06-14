@@ -5,6 +5,7 @@ import {
   average,
   bufferDrift,
   buildArcPath,
+  calibrationZeroValid,
   camberDeg,
   captureSeriesStats,
   clamp,
@@ -16,6 +17,10 @@ import {
   motionIsQuasiStatic,
   pitchDeg,
   polarPoint,
+  poseFamilyForMode,
+  poseOkForMode,
+  poseOrientation,
+  preferredOrientationForMode,
   standardDeviation,
   toleranceHalfWidth,
 } from '../assets/js/domain.js';
@@ -296,4 +301,73 @@ test('computeSampleQuality blocks settle when reading/motion/stream gates fail',
   assert.equal(blocked.readingOk, false);
   assert.equal(blocked.motionOk, false);
   assert.equal(blocked.streamOk, false);
+});
+
+test('computeSampleQuality settles even when orientationOk is false (P0-4 pose is non-blocking)', () => {
+  // A pose mismatch must NOT block a settle: it only costs confidence and is echoed for the UI.
+  const inPose = computeSampleQuality(sampleQualityInputs({ orientationOk: true }));
+  const outOfPose = computeSampleQuality(sampleQualityInputs({ orientationOk: false }));
+  assert.equal(outOfPose.settled, true);
+  assert.equal(outOfPose.orientationOk, false);
+  assert.equal(inPose.orientationOk, true);
+  // The pose mismatch still costs confidence (orientationPenalty), so it stays a visible hint.
+  assert.ok(outOfPose.confidence < inPose.confidence);
+});
+
+test('poseFamilyForMode maps camber/toe to upright and level/pitch to flat', () => {
+  assert.equal(poseFamilyForMode('camber'), 'upright');
+  assert.equal(poseFamilyForMode('toe'), 'upright');
+  assert.equal(poseFamilyForMode('level'), 'flat');
+  assert.equal(poseFamilyForMode('pitch'), 'flat');
+  // Unknown modes fall back to the flat family (same default as level/pitch).
+  assert.equal(poseFamilyForMode('unknown'), 'flat');
+});
+
+test('poseOkForMode checks physical pose, allows normal angles, rejects wrong family', () => {
+  // Upright phone (gravity along +y) is in pose for camber, out of pose for level.
+  const upright = gravityFromEuler({ beta: 90, gamma: 0 });
+  assert.equal(poseOkForMode('camber', upright), true);
+  assert.equal(poseOkForMode('level', upright), false);
+  // Flat phone (gravity along -z) is in pose for level/pitch, out of pose for camber.
+  const flat = gravityFromEuler({ beta: 0, gamma: 0 });
+  assert.equal(poseOkForMode('level', flat), true);
+  assert.equal(poseOkForMode('pitch', flat), true);
+  assert.equal(poseOkForMode('camber', flat), false);
+  // A normal camber angle (upright phone tilted 30°) is still in pose (tolerance is generous).
+  const tiltedUpright = gravityFromEuler({ beta: 60, gamma: 0 });
+  assert.equal(poseOkForMode('camber', tiltedUpright), true);
+  // Missing/zero gravity never blocks (advisory only).
+  assert.equal(poseOkForMode('camber', null), true);
+  assert.equal(poseOkForMode('camber', { x: 0, y: 0, z: 0 }), true);
+});
+
+test('poseOrientation derives the family from gravity, null when unavailable', () => {
+  assert.equal(poseOrientation(gravityFromEuler({ beta: 90, gamma: 0 })), 'portrait');
+  assert.equal(poseOrientation(gravityFromEuler({ beta: 0, gamma: 0 })), 'landscape');
+  assert.equal(poseOrientation(null), null);
+  assert.equal(poseOrientation({ x: 0, y: NaN, z: -1 }), null);
+});
+
+test('preferredOrientationForMode maps modes to their orientation family', () => {
+  assert.equal(preferredOrientationForMode('camber'), 'portrait');
+  assert.equal(preferredOrientationForMode('toe'), 'portrait');
+  assert.equal(preferredOrientationForMode('level'), 'landscape');
+  assert.equal(preferredOrientationForMode('pitch'), 'landscape');
+});
+
+test('calibrationZeroValid binds a stored zero to its capture orientation family (P1-3a)', () => {
+  // A camber zero captured in portrait (its family) is valid.
+  const portraitZero = { offset: 1.2, time: 't', orientation: 'portrait' };
+  assert.equal(calibrationZeroValid('camber', portraitZero), true);
+  // The same zero is invalid for level (which is landscape-family).
+  assert.equal(calibrationZeroValid('level', portraitZero), false);
+  // A camber zero captured in the WRONG family (landscape) is discarded.
+  const landscapeZero = { offset: 1.2, time: 't', orientation: 'landscape' };
+  assert.equal(calibrationZeroValid('camber', landscapeZero), false);
+  // No stored calibration is never valid.
+  assert.equal(calibrationZeroValid('camber', null), false);
+  assert.equal(calibrationZeroValid('camber', { time: 't', orientation: 'portrait' }), false);
+  // Optional currentOrientation also requires the live pose to match the family.
+  assert.equal(calibrationZeroValid('camber', portraitZero, 'portrait'), true);
+  assert.equal(calibrationZeroValid('camber', portraitZero, 'landscape'), false);
 });

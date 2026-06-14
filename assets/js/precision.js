@@ -182,9 +182,11 @@ export function computeGuideState({
   fixtureSelected,
   calibrationSet,
   levelPrepared,
+  // P0-4: orientationOk now means PHYSICAL pose is right for the mode (gravity-derived). It is
+  // a non-blocking hint: a mismatch appends a pose warning to the live steps but never preempts
+  // the settle/save flow, since the settle gate no longer depends on it.
   orientationOk,
-  screenOrientationLabel,
-  preferredOrientationLabel,
+  poseFamilyLabel,
   settled,
   baseline,
   precision,
@@ -192,6 +194,15 @@ export function computeGuideState({
   guide,
   telemetryActive = true,
 }) {
+  // P0-4: pose hint text appended (non-blocking) to the live settle/save steps when the phone
+  // is not in the mode's pose family. It downgrades a 'good' step to a 'warn' tone but never
+  // hides the action, so a settled reading can still be saved out of the ideal pose.
+  const poseHint = orientationOk
+    ? null
+    : `Phone is not in the ${poseFamilyLabel || guide.orientation} pose for ${modeLabel} — placement may be less repeatable.`;
+  const withPoseHint = step => poseHint
+    ? { ...step, warning: `${step.warning} ${poseHint}`, tone: step.tone === 'good' ? 'warn' : step.tone }
+    : step;
   if (!sensorsAvailable) {
     return {
       title: '1. Verify level surface',
@@ -258,50 +269,44 @@ export function computeGuideState({
       tone: 'warn',
     };
   }
-  if (!orientationOk) {
-    return {
-      title: `3. Rotate to ${guide.orientation}`,
-      description: `For ${modeLabel}, ${guide.orientation.toLowerCase()} orientation gives a more repeatable placement.`,
-      warning: `Current orientation is ${screenOrientationLabel}. Rotate to ${preferredOrientationLabel}.`,
-      tone: 'warn',
-    };
-  }
+  // P0-4: NO blocking orientation step here. A pose mismatch is folded into the live steps
+  // below via withPoseHint(), so it warns without hiding the capture/settle/save actions.
   if (workflow === 'precision' && !(precision.forward && precision.forward.count)) {
-    return {
+    return withPoseHint({
       title: '4. Capture forward readings',
       description: `Take repeated settled ${mode} readings for ${selectedSide} with the fixture in its normal orientation.`,
       warning: 'Forward precision capture set is empty.',
       tone: 'warn',
-    };
+    });
   }
   if (workflow === 'precision' && precision.needsReverse && !(precision.reverse && precision.reverse.count)) {
-    return {
+    return withPoseHint({
       title: '5. Capture reversed readings',
       description: 'Flip the jig or phone in the reversible direction, then capture the same point again to estimate fixture bias.',
       warning: 'Reversed precision capture set is still missing.',
       tone: 'warn',
-    };
+    });
   }
   if (!settled) {
-    return {
+    return withPoseHint({
       title: '4. Hold steady',
       description: 'The app is averaging recent samples. Keep the phone planted and avoid hand movement until stability turns to Settled.',
       warning: 'Movement or jitter is still above the settled threshold.',
       tone: 'warn',
-    };
+    });
   }
   if (workflow === 'precision') {
-    return {
+    return withPoseHint({
       title: '6. Save the precision report',
       description: `Review repeatability, reversal bias, and baseline trust before saving ${mode} for ${selectedSide}.`,
       warning: `${precision.verdict} • Repeatability ${precision.repeatabilityScore}%`,
       tone: precision.verdict === 'Good enough for adjustment' ? 'good' : 'warn',
-    };
+    });
   }
-  return {
+  return withPoseHint({
     title: '5. Save the averaged reading',
     description: `Reading is settled. Lock it if needed, then save the averaged ${mode} value for ${selectedSide}.`,
     warning: 'Consumer-grade sensors are best for repeatable DIY checks, not certified rack alignment.',
     tone: 'good',
-  };
+  });
 }
