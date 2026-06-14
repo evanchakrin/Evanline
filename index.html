@@ -9,7 +9,7 @@
   <meta name="theme-color" content="#0d1117" />
   <link rel="manifest" href="manifest.json" />
   <title>Evanline – Wheel Alignment</title>
-    <link rel="stylesheet" href="assets/css/styles.css?v=11" />
+    <link rel="stylesheet" href="assets/css/styles.css?v=12" />
 
 </head>
 <body>
@@ -277,7 +277,7 @@
     </details>
   </div>
 
-  <div class="gauge-card">
+  <div class="gauge-card pane-hidden">
     <span class="gauge-label" id="gauge-mode-label">Camber Angle</span>
 
     <div class="mode-explainer hidden-panel" id="toe-explainer" role="status" aria-live="polite">
@@ -323,14 +323,14 @@
     </div>
   </div>
 
-  <div class="gauge-card" id="bubble-card">
+  <div class="gauge-card pane-hidden" id="bubble-card">
     <span class="gauge-label">Visual Level</span>
     <div class="level-wrap">
       <canvas id="bubble-canvas" width="300" height="80"></canvas>
     </div>
   </div>
 
-  <div class="status-row">
+  <div class="status-row pane-hidden">
     <div class="status-chip">
       <span class="status-chip-label">Stability</span>
       <span class="status-chip-value" id="chip-stability">Waiting</span>
@@ -353,12 +353,12 @@
     </div>
   </div>
 
-  <div class="action-row">
+  <div class="action-row pane-hidden">
     <button class="btn btn-success btn-small" data-action="calibrate">Zero This Mode</button>
     <button class="btn btn-primary btn-small" id="btn-save" data-action="saveMeasurement">Save Avg</button>
     <button class="btn btn-surface btn-small" id="btn-reset-cal" data-action="resetCalibration">Reset Zero</button>
   </div>
-  <div class="control-hint" id="quick-control-hint">Save unlocks when the reading is settled.</div>
+  <div class="control-hint pane-hidden" id="quick-control-hint">Save unlocks when the reading is settled.</div>
   <div class="save-confirmation hidden-panel" id="save-confirmation" role="status" aria-live="polite"></div>
 
   <div class="gauge-card workflow-results" id="workflow-results-card">
@@ -370,7 +370,7 @@
     <div class="spec-grid" id="workflow-spec-grid" aria-label="Calculated final specs"></div>
   </div>
 
-  <div class="cal-card" id="cal-card">
+  <div class="cal-card pane-hidden" id="cal-card">
     <div class="cal-info">
       <span class="cal-title">Calibration Offset</span>
       <span class="cal-value" id="cal-value-text">None — tap Zero This Mode to calibrate</span>
@@ -417,7 +417,7 @@
     </div>
   </div>
 
-  <details class="gauge-card advanced-card">
+  <details class="gauge-card advanced-card pane-hidden">
     <summary>Advanced sensor data</summary>
     <div class="advanced-content">
       <div class="advanced-grid">
@@ -565,7 +565,7 @@
   <div class="instr-spacer"></div>
 </div>
 
-<script type="module" src="assets/js/app.js?v=11"></script>
+<script type="module" src="assets/js/app.js?v=12"></script>
 
 <dialog id="fixture-dialog" class="fixture-dialog" aria-labelledby="fixture-dialog-title">
   <form method="dialog" id="fixture-form" class="fixture-form">

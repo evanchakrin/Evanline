@@ -214,18 +214,20 @@ test('pitchDeg is zero when flat and signed for front/back tilt', () => {
 });
 
 test('camberDeg reads tilt away from vertical for an upright phone', () => {
-  // Perfectly upright portrait phone (gravity along +y) reads zero camber.
-  assert.equal(round2(camberDeg({ x: 0, y: 1, z: 0 })), 0);
-  // Upright phone leaned 10deg so gravity tips into +x => positive camber.
+  // A real upright portrait phone (top up) has gravity pointing at its BOTTOM (device -y), so
+  // camberDeg centers on -g.y and a plumb phone reads zero (NOT the ~180° the old atan2(x,y) gave,
+  // which sat on the branch cut and could never settle).
+  assert.equal(round2(camberDeg({ x: 0, y: -1, z: 0 })), 0);
+  // Top leaned 10deg so gravity tips into +x => positive camber.
   const positive = camberDeg({
     x: Math.sin(10 * Math.PI / 180),
-    y: Math.cos(10 * Math.PI / 180),
+    y: -Math.cos(10 * Math.PI / 180),
     z: 0,
   });
   assert.equal(round2(positive), 10);
   const negative = camberDeg({
     x: -Math.sin(10 * Math.PI / 180),
-    y: Math.cos(10 * Math.PI / 180),
+    y: -Math.cos(10 * Math.PI / 180),
     z: 0,
   });
   assert.equal(round2(negative), -10);
@@ -233,7 +235,8 @@ test('camberDeg reads tilt away from vertical for an upright phone', () => {
 });
 
 test('inclinationForMode dispatches per mode and defaults to camber', () => {
-  const tilted = { x: Math.sin(10 * Math.PI / 180), y: Math.cos(10 * Math.PI / 180), z: 0 };
+  // Upright camber pose: gravity along -y (see camberDeg), leaned 10deg into +x.
+  const tilted = { x: Math.sin(10 * Math.PI / 180), y: -Math.cos(10 * Math.PI / 180), z: 0 };
   assert.equal(round2(inclinationForMode('camber', tilted)), 10);
   assert.equal(round2(inclinationForMode('level', gravityFromEuler({ beta: 0, gamma: 10 }))), -10);
   assert.equal(round2(inclinationForMode('pitch', gravityFromEuler({ beta: 10, gamma: 0 }))), 10);
@@ -342,6 +345,19 @@ test('computeSampleQuality blocks settle when reading/motion/stream gates fail',
   assert.equal(blocked.readingOk, false);
   assert.equal(blocked.motionOk, false);
   assert.equal(blocked.streamOk, false);
+});
+
+test('computeSampleQuality reports the specific blockedBy reason for the UI', () => {
+  // Settled => no block reason.
+  assert.equal(computeSampleQuality(sampleQualityInputs()).blockedBy, null);
+  // Reasons are ordered most- to least-fundamental.
+  assert.equal(computeSampleQuality(sampleQualityInputs({ readingOk: false })).blockedBy, 'no-reading');
+  assert.equal(computeSampleQuality(sampleQualityInputs({ streamOk: false })).blockedBy, 'stream-stale');
+  assert.equal(computeSampleQuality(sampleQualityInputs({ motionOk: false })).blockedBy, 'motion');
+  assert.equal(computeSampleQuality(sampleQualityInputs({ sampleBuffer: [0.01, 0.02] })).blockedBy, 'collecting');
+  // A wide spread reports 'spread'; the timer-only wait reports 'holding'.
+  assert.equal(computeSampleQuality(sampleQualityInputs({ sampleBuffer: [0, 0.5, -0.5, 0.4, -0.4, 0.45] })).blockedBy, 'spread');
+  assert.equal(computeSampleQuality(sampleQualityInputs({ settledStart: 0, now: 1_000 })).blockedBy, 'holding');
 });
 
 test('computeSampleQuality settles even when orientationOk is false (P0-4 pose is non-blocking)', () => {
