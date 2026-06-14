@@ -25,10 +25,16 @@ function finiteGravity(g) {
   return g && Number.isFinite(g.x) && Number.isFinite(g.y) && Number.isFinite(g.z);
 }
 
-// Camber: phone held upright (portrait) flush against a vertical wheel face.
+// Camber: phone held upright (portrait) flush against a vertical wheel face. At that real pose
+// gravity points toward the phone's BOTTOM (device -y), so we center on -g.y: atan2(g.x, -g.y)
+// reads 0 when plumb and ±tilt as the top leans left/right. The old atan2(g.x, g.y) sat on the
+// atan2 branch cut (~±180°) for this pose, so sensor noise straddled +180/-180, the windowed
+// range exploded to ~360°, and camber could NEVER settle. The primary devicemotion accelerometer
+// path is the trustworthy source here; the Euler fallback's camber is weak near vertical
+// (gravityFromEuler loses the signal as cos(beta)->0). VERIFY sign on-device via sensor-check.html.
 export function camberDeg(g) {
   if (!finiteGravity(g)) return null;
-  return Math.atan2(g.x, g.y) * 180 / Math.PI;
+  return Math.atan2(g.x, -g.y) * 180 / Math.PI;
 }
 
 // Level: phone flat in landscape, left/right tilt across the device width.
@@ -399,6 +405,19 @@ export function computeSampleQuality({
 
   const aligned = alignedNow && (now - nextAlignedStart >= alignedHoldMs);
 
+  // P0/UX: surface the single reason a settle is blocked so the UI can tell the user what to do
+  // instead of leaving the workflow stuck with no explanation. Ordered most- to least-fundamental.
+  let blockedBy = null;
+  if (settled) blockedBy = null;
+  else if (!readingOk) blockedBy = 'no-reading';
+  else if (!streamOk) blockedBy = 'stream-stale';
+  else if (!enoughSamples) blockedBy = 'collecting';
+  else if (!motionOk) blockedBy = 'motion';
+  else if (range > settledRange) blockedBy = 'spread';
+  else if (stdDev > settledStdDev) blockedBy = 'jitter';
+  else if (drift > driftTol) blockedBy = 'drift';
+  else blockedBy = 'holding';
+
   return {
     avg,
     range,
@@ -408,6 +427,7 @@ export function computeSampleQuality({
     readingOk,
     motionOk,
     streamOk,
+    blockedBy,
     // P0-4: echoed back so the UI can render the pose hint, even though it no longer gates.
     orientationOk: !!orientationOk,
     confidence,

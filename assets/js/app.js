@@ -92,17 +92,24 @@ const SMOOTHING_ALPHA = 0.22;
 const GRAVITY_FRESH_MS = 400;
 const SAMPLE_WINDOW = 12;
 const MIN_SAMPLE_COUNT = 6;
-const SETTLED_RANGE = 0.18;
-const SETTLED_STDDEV = 0.08;
+// SETTLE THRESHOLDS gate the RAW (un-EMA'd) buffer, which is ~3x noisier than the old smoothed
+// stream these were originally tuned for. They were re-tuned up so a hand-held / fixtured phone
+// can actually reach "Settled" (the old 0.18/0.08/0.03 made settling effectively impossible on a
+// real device — the workflows hung). The displayed ±tolerance band keeps the reading honest about
+// real noise. Tune against live "spread σ X°" in the status chip / sensor-check.html if needed.
+const SETTLED_RANGE = 0.7;
+const SETTLED_STDDEV = 0.3;
 const SETTLED_HOLD_MS = 900;
 // P0-3 drift gate: half-to-half trend of the RAW buffer must stay under this before settling.
-const SETTLED_DRIFT = 0.03;
+const SETTLED_DRIFT = 0.2;
 // P0-6 motion gate: |gravity| must stay within this ratio of expected (~9.81 m/s^2 or ~1g),
-// and rotation under ROTATION_TOL deg/s, before a settle is allowed.
-const MOTION_RATIO_BAND = 0.06;
-const ROTATION_TOL = 8;
+// and rotation under ROTATION_TOL deg/s, before a settle is allowed. Widened so normal hand
+// tremor while holding the phone does not reset the settle timer every frame.
+const MOTION_RATIO_BAND = 0.15;
+const ROTATION_TOL = 25;
 // P1-6 stream health: if no fresh sensor event arrives within this window, void the settle.
-const STREAM_STALE_MS = 250;
+// Generous enough to tolerate iOS throttling / Low Power Mode without falsely voiding a settle.
+const STREAM_STALE_MS = 800;
 // P1-6 device reference staleness: warn when the saved device profile is older than this.
 const DEVICE_PROFILE_STALE_MS = 6 * 60 * 60 * 1000;
 // P0-7: a 180° flip self-test passes when the residual bias |(a+b)/2| stays under this many
@@ -140,6 +147,9 @@ const state = {
   lastSensorWallTime: 0,
   // P0-5: true while the chosen gravity/axis yields no finite reading (don't feed 0 in).
   readingMissing: false,
+  // P0/UX: which gate is currently preventing a settle (from computeSampleQuality), so the
+  // workflow can tell the user WHY it is not settling instead of hanging silently.
+  settleBlockedBy: null,
   // P2-4: compass/heading awareness. headingTrusted is true only when an ABSOLUTE compass heading
   // with acceptable accuracy is available; otherwise heading is relative/poor and must NOT be used
   // as a yaw reference (raw alpha is never trusted). heading/headingAccuracy/headingReason hold the
@@ -725,6 +735,7 @@ function updateSampleQuality() {
   state.aligned = result.aligned;
   state.confidence = result.confidence;
   state.toleranceDeg = result.toleranceDeg;
+  state.settleBlockedBy = result.blockedBy;
 }
 
 function loadState() {
@@ -1813,6 +1824,23 @@ function refreshGuide() {
   guideAction.disabled = actionState.action === 'none';
 }
 
+// P0/UX: turn the settle-block reason into a concrete, actionable line so the user knows WHY
+// the reading will not settle (the old UI just said "hold steady" forever). Includes the live
+// raw spread/σ so it doubles as a tuning readout against the SETTLED_* thresholds.
+function settleBlockText() {
+  switch (state.settleBlockedBy) {
+    case 'no-reading': return 'No sensor reading for this mode.';
+    case 'stream-stale': return 'Waiting for sensor data…';
+    case 'collecting': return `Collecting samples (${state.rawSampleBuffer.length}/${MIN_SAMPLE_COUNT}).`;
+    case 'motion': return 'Hold still — motion or vibration detected.';
+    case 'spread': return `Too much movement (spread ${formatNumber(sampleRange())}°).`;
+    case 'jitter': return `Too much jitter (σ ${formatNumber(sampleStdDev())}°).`;
+    case 'drift': return 'Still drifting — let it settle.';
+    case 'holding': return 'Holding steady…';
+    default: return 'Settled average is ready.';
+  }
+}
+
 function refreshReadiness() {
   const actionState = guideActionState();
   const summary = precisionSummary(state.mode, state.selectedSide);
@@ -1823,7 +1851,7 @@ function refreshReadiness() {
     ? precisionSaveReason(summary)
     : (state.readingMissing
         ? 'No reading available for this mode yet.'
-        : (state.settled ? 'Settled average is ready.' : `${state.rawSampleBuffer.length}/${SAMPLE_WINDOW} samples • hold steady.`));
+        : (state.settled ? 'Settled average is ready.' : settleBlockText()));
   const liveState = !state.sensorListenerAttached
     ? 'Paused'
     : (!state.sampleBuffer.length ? 'Waiting' : (state.settled ? 'Settled' : 'Settling'));
