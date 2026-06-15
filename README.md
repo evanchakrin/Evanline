@@ -10,7 +10,7 @@ Uses the iPhone's built-in **gyroscope & accelerometer** (DeviceOrientation API)
 | Feature | Details |
 |---|---|
 | **Camber mode** | Measure wheel-face camber angle (tilt relative to vertical) |
-| **Toe (experimental)** | Toe is **not** a sensor reading — a gravity sensor is blind to rotation about vertical and has no centerline reference. The app links to the geometric method (string lines, turn plates, or `atan(rim offset / rim length)`) instead of reporting a fake toe angle |
+| **Toe (geometric)** | Toe is **not** a sensor reading — a gravity sensor is blind to rotation about vertical and has no centerline reference — so the Toe tab is a **guided geometric calculator**. The **quick** path (plates + 2 tapes) computes TOTAL axle toe = `atan((R − F) / D)` from gaps measured over a **measured** reference span `D`, with a forced **roll-and-average runout step** (roll ~180°, re-seat, re-measure; single reads are refused). The **precision** string-box path splits left/right per wheel and reports total front/rear toe plus the **thrust angle**. Every result carries a ±band and its linear equivalent at the quoted diameter; honest accuracy ~0.2–0.3° |
 | **Level mode** | Check if the vehicle or surface is left-right level |
 | **Pitch mode** | Measure front-to-back pitch angle |
 | **Sensor smoothing** | Smooths the live feed and averages recent samples before display |
@@ -81,7 +81,7 @@ Honest measurement matters more than a precise-looking digit. Follow these rules
 2. **Register to a defined plane every time.** Camber registers to the machined **wheel face** (clear of the curved lip and decorative spokes — wheel-face camber is *not* tire camber); level/pitch register to a fixed body datum. Re-use the exact same surface on every corner.
 3. **Hold quasi-static.** Let the reading **settle**; the app rejects captures while the phone is moving, pressed, or spinning so motion noise cannot leak into the number.
 4. **Do the flip test.** Run the **180° flip self-test** before trusting a value: read, flip the phone 180° about the measurement axis, read again. A true inclinometer reads equal-and-opposite, so the residual bias `(a + b) / 2` should be near zero. Repeatability alone is **not** trueness.
-5. **Toe is geometric.** The phone cannot measure toe. Use string lines, turn plates, or `atan(front-vs-rear rim offset / rim length)`.
+5. **Toe is geometric.** The phone cannot sense toe — use the guided Toe wizard. Enter the front-vs-rear rim/plate gap over a **measured** reference span `D` (`atan((R − F) / D)`), reference the **rim, not the tire sidewall or lettering**, and do the **roll-and-average runout step** (roll ~180°, re-seat, re-measure) since runout is the dominant error. The precision string-box path adds the per-wheel split and thrust angle.
 6. **Read the band, not the digit.** Every saved value carries a `± Y.YY° (95%)` confidence band. Treat the band — not the single displayed digit — as the real result.
 7. **Scale-calibrate against a known angle (optional).** After zeroing, if you have a machined reference wedge, tap **Set scale**, hold the phone on it, and enter the true angle. The app derives `gain = true / measured` and scales every later reading, correcting a sensor that under/over-reports. Left unset, the gain stays `1.00×` (no change).
 

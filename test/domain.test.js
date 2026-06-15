@@ -38,6 +38,7 @@ import {
   toeReadUncertaintyDeg,
   toeRunoutDisagreement,
   computeToeWizardResult,
+  computeToeStringBoxResult,
   toleranceHalfWidth,
   totalToeFromPlates,
   perWheelFromTotal,
@@ -682,10 +683,23 @@ test('normalizeMeasurement round-trips a geometric toe reading and its toe stamp
   assert.equal(toe.toeSymmetryAssumed, true);
   assert.equal(toe.toeRunoutDisagreement, 0.04);
   assert.equal(toe.toeRunoutFault, false);
+  // Stage 3: a PRECISION string-box reading round-trips its method, thrust, and no-symmetry flag.
+  const sb = normalizeMeasurement({
+    mode: 'toe', side: 'RL', value: 0.05, workflow: 'geometric',
+    toeMethod: 'string-box', toeUnits: 'mm', toeDiameter: 381, toeSpecDiameter: 381,
+    toeTotal: 0.1, toePerWheel: 0.05, toeLinear: 0.7, toeThrust: 0.03,
+    toeSymmetryAssumed: false,
+  }, 'NOW');
+  assert.equal(sb.toeMethod, 'string-box');
+  assert.equal(sb.toeThrust, 0.03);
+  assert.equal(sb.toeSymmetryAssumed, false);
+  // The thrust stamp is null on the plates reading above (and on non-toe readings).
+  assert.equal(toe.toeThrust, null);
   // A legacy sensor reading carries null/false for every toe field and keeps its workflow.
   const legacy = normalizeMeasurement({ mode: 'camber', side: 'FR', value: 1.0, workflow: 'precision' }, 'NOW');
   assert.equal(legacy.workflow, 'precision');
   assert.equal(legacy.toeMethod, null);
+  assert.equal(legacy.toeThrust, null);
   assert.equal(legacy.toeSymmetryAssumed, false);
   assert.equal(legacy.toeRunoutFault, false);
   // An unknown workflow string still falls back to 'quick'.
@@ -878,4 +892,83 @@ test('computeToeWizardResult surfaces the band, linear equivalent, and runout di
   assert.equal(noSpec.method, 'tape');
   assert.equal(noSpec.totalLinear, null);
   assert.equal(noSpec.perWheelLinear, null);
+});
+
+test('computeToeStringBoxResult needs a positive diameter and all four corners', () => {
+  const setup = { diameter: 28.648, specDiameter: 28.648, readUncertainty: 0.8 };
+  const reads = {
+    FL: { front: 1, rear: 0 },
+    FR: { front: 1, rear: 0 },
+    RL: { front: 1, rear: 0 },
+    RR: { front: 1, rear: 0 },
+  };
+  // No diameter => not ready, with guidance.
+  const noD = computeToeStringBoxResult({ ...setup, diameter: 0 }, reads);
+  assert.equal(noD.ready, false);
+  assert.match(noD.reason, /reference diameter/);
+  // Missing a corner => not ready and the reason names it.
+  const partial = computeToeStringBoxResult(setup, { FL: reads.FL, FR: reads.FR, RL: reads.RL });
+  assert.equal(partial.ready, false);
+  assert.match(partial.reason, /RR/);
+  assert.equal(partial.perWheel.RR, null);
+  // The band is still surfaced even before all corners are in.
+  assert.ok(Math.abs(partial.toleranceDeg - toeReadUncertaintyDeg(0.8, 28.648, true)) < 1e-12);
+});
+
+test('computeToeStringBoxResult is toe-in positive when the front edge sits farther from the string', () => {
+  const setup = { diameter: 28.648 };
+  // frontGap (1) > rearGap (0): leading edge farther from the outboard string => nearer centerline
+  // => toe-IN => positive, matching the "1 inch = ~2 deg" self-check.
+  const res = computeToeStringBoxResult(setup, {
+    FL: { front: 1, rear: 0 },
+    FR: { front: 1, rear: 0 },
+    RL: { front: 1, rear: 0 },
+    RR: { front: 1, rear: 0 },
+  });
+  assert.equal(res.ready, true);
+  assert.ok(res.perWheel.FL > 0);
+  assert.ok(Math.abs(res.perWheel.FL - 1.999) < 1e-3);
+  // rearGap > frontGap => toe-OUT => negative.
+  const out = computeToeStringBoxResult(setup, {
+    FL: { front: 0, rear: 1 },
+    FR: { front: 0, rear: 1 },
+    RL: { front: 0, rear: 1 },
+    RR: { front: 0, rear: 1 },
+  });
+  assert.ok(out.perWheel.FL < 0);
+});
+
+test('computeToeStringBoxResult totals, thrust, and thrust-referenced front toe', () => {
+  const setup = { diameter: 100, specDiameter: 100 };
+  const res = computeToeStringBoxResult(setup, {
+    FL: { front: 3, rear: 0 },
+    FR: { front: 1, rear: 0 },
+    RL: { front: 2, rear: 0 },
+    RR: { front: 1, rear: 0 },
+  });
+  assert.equal(res.ready, true);
+  // Totals are the sum of the per-wheel pair.
+  assert.ok(Math.abs(res.totalFront - (res.perWheel.FL + res.perWheel.FR)) < 1e-12);
+  assert.ok(Math.abs(res.totalRear - (res.perWheel.RL + res.perWheel.RR)) < 1e-12);
+  // Thrust = (toeRL - toeRR) / 2, positive when RL toes in more than RR (thrust points left).
+  assert.ok(Math.abs(res.thrust - (res.perWheel.RL - res.perWheel.RR) / 2) < 1e-12);
+  assert.ok(res.thrust > 0);
+  // Thrust-referencing preserves total front toe (FL - t) + (FR + t) = FL + FR.
+  const refTotal = res.frontThrustReferenced.FL + res.frontThrustReferenced.FR;
+  assert.ok(Math.abs(refTotal - res.totalFront) < 1e-12);
+  assert.ok(Math.abs(res.frontThrustReferenced.FL - (res.perWheel.FL - res.thrust)) < 1e-12);
+  // Linear equivalent travels per corner when a spec diameter is given.
+  assert.ok(Math.abs(res.perWheelLinear.FL - toeAngleToLinear(res.perWheel.FL, 100)) < 1e-12);
+});
+
+test('computeToeStringBoxResult omits the linear equivalent without a spec diameter', () => {
+  const res = computeToeStringBoxResult({ diameter: 100 }, {
+    FL: { front: 1, rear: 0 },
+    FR: { front: 1, rear: 0 },
+    RL: { front: 1, rear: 0 },
+    RR: { front: 1, rear: 0 },
+  });
+  assert.equal(res.ready, true);
+  assert.equal(res.specDiameter, null);
+  assert.equal(res.perWheelLinear.FL, null);
 });

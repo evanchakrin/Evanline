@@ -961,10 +961,53 @@
       align-items: end;
     }
     .toe-save-side { min-width: 0; }
+    /* PRECISION string-box per-wheel + thrust section (precision toe path). */
+    .toe-stringbox summary {
+      color: var(--accent);
+    }
+    .toe-checklist {
+      margin: 0;
+      padding-left: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 12px;
+      line-height: 1.4;
+      color: var(--text);
+    }
+    .toe-stringbox-grid {
+      width: 100%;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .toe-corner {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+    }
+    .toe-corner-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+    }
+    .toe-corner-result {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--accent);
+      font-variant-numeric: tabular-nums;
+    }
     @media (max-width: 380px) {
       .toe-field-grid,
       .toe-reads,
-      .toe-result { grid-template-columns: 1fr; }
+      .toe-result,
+      .toe-stringbox-grid { grid-template-columns: 1fr; }
       .toe-save-row { grid-template-columns: 1fr; }
     }
 

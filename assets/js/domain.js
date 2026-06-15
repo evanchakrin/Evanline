@@ -207,6 +207,9 @@ export function normalizeCalibrationMeta(item) {
 // saved geometric toe reading round-trips through storage; legacy/sensor readings carry null/false
 // for every toe field, so nothing changes for camber/level/pitch or pre-existing data.
 const KNOWN_WORKFLOWS = ['quick', 'precision', 'geometric'];
+// GEOMETRIC TOE methods that round-trip through storage: the quick plates/tape paths (TOTAL toe)
+// and the Stage 3 PRECISION 'string-box' path (per-wheel + thrust). Anything else coerces to null.
+const TOE_METHODS = ['plates', 'tape', 'string-box'];
 function normalizeWorkflow(workflow) {
   return KNOWN_WORKFLOWS.includes(workflow) ? workflow : 'quick';
 }
@@ -250,13 +253,16 @@ export function normalizeMeasurement(item = {}, nowIso = new Date().toISOString(
     pose: item.pose === 'landscape' || item.pose === 'portrait' ? item.pose : null,
     deviceRefTime: typeof item.deviceRefTime === 'string' ? item.deviceRefTime : null,
     // GEOMETRIC TOE: geometric-method context stamps (null/false on every non-toe reading).
-    toeMethod: item.toeMethod === 'plates' || item.toeMethod === 'tape' ? item.toeMethod : null,
+    // Stage 3 adds the PRECISION 'string-box' method and the thrust-angle stamp.
+    toeMethod: TOE_METHODS.includes(item.toeMethod) ? item.toeMethod : null,
     toeUnits: item.toeUnits === 'in' || item.toeUnits === 'mm' ? item.toeUnits : null,
     toeDiameter: Number.isFinite(item.toeDiameter) ? Number(item.toeDiameter) : null,
     toeSpecDiameter: Number.isFinite(item.toeSpecDiameter) ? Number(item.toeSpecDiameter) : null,
     toeTotal: Number.isFinite(item.toeTotal) ? Number(item.toeTotal) : null,
     toePerWheel: Number.isFinite(item.toePerWheel) ? Number(item.toePerWheel) : null,
     toeLinear: Number.isFinite(item.toeLinear) ? Number(item.toeLinear) : null,
+    // PRECISION string-box thrust angle; null on plates/tape/sensor readings.
+    toeThrust: Number.isFinite(item.toeThrust) ? Number(item.toeThrust) : null,
     toeSymmetryAssumed: item.toeSymmetryAssumed === true,
     toeRunoutDisagreement: Number.isFinite(item.toeRunoutDisagreement) ? Number(item.toeRunoutDisagreement) : null,
     toeRunoutFault: item.toeRunoutFault === true,
@@ -670,6 +676,97 @@ export function computeToeWizardResult(setup = {}, reads = []) {
     totalLinear,
     perWheelLinear,
     specDiameter,
+  };
+}
+
+// GEOMETRIC TOE — PRECISION string-box path. Pure, sensor-free per-wheel toe for all four corners
+// plus the TOTAL front/rear toe and the THRUST ANGLE. The user pulls two strings parallel to the
+// car (one down each side) and, per wheel, measures the gap from the string to the rim at the FRONT
+// edge and the REAR edge over the reference length D. toe-in is POSITIVE.
+//
+// SIGN: a wheel toes IN when its leading (front) edge is nearer the vehicle centerline than the
+// trailing (rear) edge. With both strings OUTBOARD of the wheels, "nearer the centerline" means
+// "farther from the string", so on each side the toe-in offset is (frontGap - rearGap). The Stage 1
+// helper toeAngleFromOffset(rear, front, D) returns +atan((rear - front)/D); feeding it
+// (rear = frontGap, front = rearGap) yields +atan((frontGap - rearGap)/D) = toe-in positive for BOTH
+// sides, so left and right share one convention without a per-side flip.
+//
+// `setup`: { diameter (D, required > 0), specDiameter (for the linear equivalent, optional),
+//   readUncertainty (same units as D, for the +/- band, optional) }.
+// `corners`: { FL:{front,rear}, FR:{...}, RL:{...}, RR:{...} } string-to-rim gaps in the SAME units
+//   as D. A corner with non-finite or missing front/rear yields a null per-wheel angle.
+//
+// Returns { perWheel:{FL,FR,RL,RR}, totalFront, totalRear, thrust, frontThrustReferenced:{FL,FR},
+//   toleranceDeg, specDiameter, perWheelLinear:{...}, ready, reason }. totalFront = toeFL + toeFR,
+//   totalRear = toeRL + toeRR, thrust = (toeRL - toeRR)/2 (+ = thrust line points LEFT). Front
+//   per-wheel toe is re-referenced from the geometric centerline to the THRUST line by subtracting
+//   the thrust angle on the left and adding it on the right. `ready` is true once all four corners
+//   resolve (every corner needed for total + thrust). Nothing is rounded here.
+export function computeToeStringBoxResult(setup = {}, corners = {}) {
+  const diameter = setup.diameter;
+  const specDiameter = Number.isFinite(setup.specDiameter) && setup.specDiameter > 0 ? setup.specDiameter : null;
+  const sideKeys = ['FL', 'FR', 'RL', 'RR'];
+
+  const perWheel = { FL: null, FR: null, RL: null, RR: null };
+  const perWheelLinear = { FL: null, FR: null, RL: null, RR: null };
+  const base = {
+    perWheel,
+    perWheelLinear,
+    totalFront: null,
+    totalRear: null,
+    thrust: null,
+    frontThrustReferenced: { FL: null, FR: null },
+    toleranceDeg: null,
+    specDiameter,
+    ready: false,
+    reason: '',
+  };
+
+  if (!Number.isFinite(diameter) || diameter <= 0) {
+    return { ...base, reason: 'Enter a positive reference diameter / length before measuring string offsets.' };
+  }
+
+  sideKeys.forEach(side => {
+    const corner = corners[side];
+    if (!corner || !Number.isFinite(corner.front) || !Number.isFinite(corner.rear)) return;
+    // toe-in positive: front gap larger than rear gap => leading edge farther from the outboard
+    // string => nearer the centerline => toe-IN. toeAngleFromOffset(rear=frontGap, front=rearGap, D).
+    perWheel[side] = toeAngleFromOffset(corner.front, corner.rear, diameter);
+    perWheelLinear[side] = specDiameter === null ? null : toeAngleToLinear(perWheel[side], specDiameter);
+  });
+
+  const toleranceDeg = toeReadUncertaintyDeg(setup.readUncertainty, diameter, true);
+  const allReady = sideKeys.every(side => Number.isFinite(perWheel[side]));
+
+  if (!allReady) {
+    const missing = sideKeys.filter(side => !Number.isFinite(perWheel[side]));
+    return {
+      ...base,
+      toleranceDeg,
+      reason: `Enter front and rear string offsets for: ${missing.join(', ')}.`,
+    };
+  }
+
+  const totalFront = perWheel.FL + perWheel.FR;
+  const totalRear = perWheel.RL + perWheel.RR;
+  const thrust = thrustAngle(perWheel.RL, perWheel.RR);
+  // Re-reference the FRONT per-wheel toe from the geometric centerline to the thrust line: the
+  // thrust line is rotated by `thrust` toward the left, so the left wheel's toe shrinks by `thrust`
+  // and the right wheel's grows by `thrust` to keep total front toe invariant.
+  const frontThrustReferenced = {
+    FL: perWheel.FL - thrust,
+    FR: perWheel.FR + thrust,
+  };
+
+  return {
+    ...base,
+    toleranceDeg,
+    totalFront,
+    totalRear,
+    thrust,
+    frontThrustReferenced,
+    ready: true,
+    reason: 'Per-wheel, total, and thrust angle are ready.',
   };
 }
 
