@@ -2112,6 +2112,24 @@ function symmetricToePair(leftSide, rightSide) {
   return !!left && !!right && left.toeSymmetryAssumed === true && right.toeSymmetryAssumed === true;
 }
 
+// GEOMETRIC TOE: the honest note for a toe L-R delta, shared by the saved-readings card AND the
+// workflow-results grid so both surfaces describe the SAME data identically. A front/rear pair
+// saved from a single TOTAL plate read holds the same value on both corners (the L-R split is a
+// symmetry assumption), so the delta is 0 by construction — flag that rather than implying a
+// measured per-wheel difference. A real per-wheel save (string-box) gives a genuine left-right
+// delta referenced to the thrust line. `axle` selects the rear-specific thrust-angle wording.
+function toeDeltaNote(leftSide, rightSide, delta, axle = 'front') {
+  if (delta === null) {
+    return `Use the geometric toe wizard to save ${leftSide} and ${rightSide}.`;
+  }
+  if (symmetricToePair(leftSide, rightSide)) {
+    return `Δ is 0 by assumption — a TOTAL plate read cannot split ${leftSide} vs ${rightSide}.`;
+  }
+  return axle === 'rear'
+    ? 'Per-wheel rear toe delta drives the thrust angle ((RL − RR) / 2).'
+    : 'Per-wheel toe delta. Reference to the thrust line, not the centerline, for adjustment.';
+}
+
 function buildElement(tagName, className, text) {
   const element = document.createElement(tagName);
   if (className) element.className = className;
@@ -2774,9 +2792,19 @@ function refreshWorkflowResults() {
 
   const frontDelta = deltaFor(state.mode, 'FL', 'FR');
   const rearDelta = deltaFor(state.mode, 'RL', 'RR');
+  // GEOMETRIC TOE: in toe mode reuse the shared toeDeltaNote so the grid flags a plates-only pair
+  // as "Δ is 0 by assumption" instead of the misleading generic "FL − FR" — matching the
+  // saved-readings card exactly. Other modes keep the literal subtraction note.
+  const isToe = state.mode === 'toe';
+  const frontDeltaNote = frontDelta === null
+    ? 'Needs FL + FR'
+    : (isToe ? toeDeltaNote('FL', 'FR', frontDelta, 'front') : 'FL − FR');
+  const rearDeltaNote = rearDelta === null
+    ? 'Needs RL + RR'
+    : (isToe ? toeDeltaNote('RL', 'RR', rearDelta, 'rear') : 'RL − RR');
   [
-    ['Front Δ', frontDelta === null ? 'Pending' : formatSigned(frontDelta), frontDelta === null ? 'Needs FL + FR' : 'FL − FR'],
-    ['Rear Δ', rearDelta === null ? 'Pending' : formatSigned(rearDelta), rearDelta === null ? 'Needs RL + RR' : 'RL − RR'],
+    ['Front Δ', frontDelta === null ? 'Pending' : formatSigned(frontDelta), frontDeltaNote],
+    ['Rear Δ', rearDelta === null ? 'Pending' : formatSigned(rearDelta), rearDeltaNote],
     ['Baseline', baseline.complete ? baseline.label : `${baseline.completedSides}/4`, state.workflow === 'precision' ? 'Level plane quality' : 'Use Level first'],
   ].forEach(([label, value, note]) => {
     const item = buildElement('div', `spec-item${value !== 'Pending' ? ' ready' : ''}`);
@@ -2812,22 +2840,11 @@ function refreshSavedReadings() {
   el('front-delta').textContent = frontDelta === null ? '—' : formatSigned(frontDelta);
   el('rear-delta').textContent = rearDelta === null ? '—' : formatSigned(rearDelta);
   if (state.mode === 'toe') {
-    // GEOMETRIC TOE: toe values now come from the wizard (geometric, sensor-free). A front pair
-    // saved from a single TOTAL plate read holds the same value on both corners (the L-R split is a
-    // symmetry assumption), so the delta is 0 by construction — flag that rather than implying it is
-    // a measured per-wheel difference. Single-corner per-wheel saves give a real left-right delta.
-    const frontPairSymmetric = SIDES.includes('FL') && symmetricToePair('FL', 'FR');
-    const rearPairSymmetric = symmetricToePair('RL', 'RR');
-    el('front-delta-note').textContent = frontDelta === null
-      ? 'Use the geometric toe wizard to save FL and FR.'
-      : (frontPairSymmetric
-          ? 'Δ is 0 by assumption — a TOTAL plate read cannot split FL vs FR.'
-          : 'Per-wheel toe delta. Reference to the thrust line, not the centerline, for adjustment.');
-    el('rear-delta-note').textContent = rearDelta === null
-      ? 'Use the geometric toe wizard to save RL and RR.'
-      : (rearPairSymmetric
-          ? 'Δ is 0 by assumption — a TOTAL plate read cannot split RL vs RR.'
-          : 'Per-wheel rear toe delta drives the thrust angle ((RL − RR) / 2).');
+    // GEOMETRIC TOE: toe values come from the wizard (geometric, sensor-free). The honest L-R
+    // delta note (symmetry-assumed vs real per-wheel) is shared with the workflow-results grid
+    // via toeDeltaNote so both surfaces describe the same save identically.
+    el('front-delta-note').textContent = toeDeltaNote('FL', 'FR', frontDelta, 'front');
+    el('rear-delta-note').textContent = toeDeltaNote('RL', 'RR', rearDelta, 'rear');
   } else {
     // P2-3: warn when a delta is computed across mismatched calibration/orientation contexts.
     const frontContext = deltaContextFor(state.mode, 'FL', 'FR');
