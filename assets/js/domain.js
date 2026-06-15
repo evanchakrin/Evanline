@@ -1005,3 +1005,17 @@ export function casterSwingResult({
     hasIn,
   };
 }
+
+// HONEST PERSISTED caster band. casterSwingResult.toleranceDeg is ONLY the propagated camber
+// read-noise term (~±0.1–0.2° for a settled phone), which under-states the true camber-swing caster
+// accuracy by 5–10x — turn-plate angle error, phone-to-wheel-face seating, and tyre deflection all
+// add uncertainty the read-noise term cannot see. The realistic accuracy is ~±0.5 to 1°. When the
+// caster is SAVED (and the live verdict that surfaces that floor disappears), the persisted band must
+// not read tighter than the documented honest accuracy. This returns max(propagated, floor): the
+// read-noise term is kept as a LOWER bound (it wins only when it is itself larger than the floor), so
+// the saved "value ± band (95%)" is never falsely tight. Non-finite propagated band => the floor.
+export function casterPersistedBandDeg(propagatedBandDeg, realisticFloorDeg) {
+  const floor = Number.isFinite(realisticFloorDeg) ? Math.abs(realisticFloorDeg) : 0;
+  const propagated = Number.isFinite(propagatedBandDeg) ? Math.abs(propagatedBandDeg) : 0;
+  return Math.max(propagated, floor);
+}

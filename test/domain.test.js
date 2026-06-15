@@ -11,6 +11,7 @@ import {
   casterFromCamberSwing,
   casterBandDeg,
   casterSwingResult,
+  casterPersistedBandDeg,
   captureSeriesStats,
   clamp,
   clampAngle,
@@ -1131,4 +1132,32 @@ test('casterSwingResult band falls back to 0 (best case) when no per-read bands 
   const res = casterSwingResult({ camberOut: 0.8, camberIn: -0.6, steerAngleDeg: 20 });
   assert.equal(res.ready, true);
   assert.equal(res.toleranceDeg, 0);
+});
+
+test('casterPersistedBandDeg floors the propagated read-noise band at the realistic accuracy', () => {
+  // The propagated read-noise band (~±0.1–0.2°) is well under the ~±0.5° realistic floor, so the
+  // SAVED band must be the floor, not the optimistic read-noise number.
+  assert.equal(casterPersistedBandDeg(0.15, 0.5), 0.5);
+  assert.equal(casterPersistedBandDeg(0.2, 0.5), 0.5);
+  // A 0 read-noise band (no per-read bands supplied) still floors to the realistic accuracy.
+  assert.equal(casterPersistedBandDeg(0, 0.5), 0.5);
+});
+
+test('casterPersistedBandDeg keeps the read-noise band when it is the LARGER (honest lower bound)', () => {
+  // The floor is a LOWER bound only — a noisier read whose propagated band exceeds the floor must
+  // not be hidden behind the floor.
+  assert.equal(casterPersistedBandDeg(0.8, 0.5), 0.8);
+  assert.equal(casterPersistedBandDeg(1.2, 0.5), 1.2);
+});
+
+test('casterPersistedBandDeg treats non-finite / negative inputs as magnitudes, never NaN', () => {
+  // A null/NaN propagated band (e.g. an undefined toleranceDeg) collapses to just the floor.
+  assert.equal(casterPersistedBandDeg(null, 0.5), 0.5);
+  assert.equal(casterPersistedBandDeg(NaN, 0.5), 0.5);
+  assert.equal(casterPersistedBandDeg(undefined, 0.5), 0.5);
+  // A non-finite floor degrades to read-noise-only (max with 0).
+  assert.equal(casterPersistedBandDeg(0.3, NaN), 0.3);
+  assert.equal(casterPersistedBandDeg(NaN, NaN), 0);
+  // Signs are taken by magnitude, so the result is never negative.
+  assert.equal(casterPersistedBandDeg(-0.15, -0.5), 0.5);
 });

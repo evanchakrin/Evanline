@@ -9,6 +9,7 @@ import {
   computeToeWizardResult,
   computeToeStringBoxResult,
   casterSwingResult,
+  casterPersistedBandDeg,
   deltaContextMatch,
   flipSelfTest,
   gravityFromEuler,
@@ -147,6 +148,13 @@ const MEASUREMENT_HISTORY_DEPTH = 4;
 // must agree within this many degrees before a save is trusted.
 const TOE_DEFAULT_READ_UNCERTAINTY = { mm: 0.8, in: 0.8 / 25.4 };
 const TOE_RUNOUT_THRESHOLD_DEG = 0.25;
+// CASTER honest accuracy floor. casterSwingResult.toleranceDeg is ONLY the propagated camber
+// read-noise band (~±0.1–0.2° for a settled phone). That under-states the true camber-swing caster
+// accuracy by 5–10x: turn-plate angle error, phone-to-wheel-face seating, and tyre deflection all add
+// uncertainty the read-noise term cannot see. The documented realistic accuracy is ~±0.5–1°, so the
+// PERSISTED band (what the saved card prominently shows once the live verdict is gone) is floored here
+// — the propagated read-noise stays as the lower bound, never presented as the total 95% accuracy.
+const CASTER_REALISTIC_FLOOR_DEG = 0.5;
 
 const state = {
   mode: 'level',
@@ -2220,6 +2228,12 @@ function saveCasterMeasurement() {
   }
   const c = state.caster;
   const side = c.side === 'FR' ? 'FR' : 'FL';
+  // Persist the HONEST band, not the bare read-noise term. result.toleranceDeg is only the propagated
+  // camber read-noise (~±0.1–0.2°); the live verdict shows the realistic ~±0.5–1° floor, but that
+  // verdict disappears on save. casterPersistedBandDeg floors the persisted band at
+  // CASTER_REALISTIC_FLOOR_DEG so the saved card's prominent "value ± band (95%)" never reads tighter
+  // than the documented honest accuracy. (The read-noise term still wins when it is the larger.)
+  const honestBand = casterPersistedBandDeg(result.toleranceDeg, CASTER_REALISTIC_FLOOR_DEG);
   // SIGN CAVEAT: the caster magnitude is robust, but the absolute sign depends on the steer/phone
   // geometry and must be validated against a known-caster reference. Surface it in the verdict.
   const trustVerdict = `Camber-swing caster • ±${formatNumber(c.steerAngle)}° steer • validate sign vs a known reference`;
@@ -2231,7 +2245,7 @@ function saveCasterMeasurement() {
     // Caster confidence is the propagated band, not a settle %; mark it 100 so it is not penalised
     // as "low trust" in the grid (the band + sign caveat carry the honest uncertainty).
     confidence: 100,
-    toleranceDeg: Number.isFinite(result.toleranceDeg) ? Number(result.toleranceDeg.toFixed(3)) : null,
+    toleranceDeg: Number(honestBand.toFixed(3)),
     samples: 2,
     time: new Date().toISOString(),
     // Distinguish caster saves from sensor quick/precision and geometric toe saves.
@@ -2262,7 +2276,7 @@ function saveCasterMeasurement() {
   resetLiveAveraging();
   saveState();
   pauseSensors();
-  setSaveConfirmation(`Saved caster ${formatSigned(measurement.value)} ${formatTolerance(result.toleranceDeg)} to ${side} (validate sign vs a known reference).`);
+  setSaveConfirmation(`Saved caster ${formatSigned(measurement.value)} ${formatTolerance(measurement.toleranceDeg)} to ${side} (validate sign vs a known reference).`);
   setNotice(`Saved camber-swing caster for ${side}. Validate the sign against a known-caster reference. Measurement paused.`, 'good');
   refreshUI();
 }
@@ -3095,9 +3109,10 @@ function savedNoteForReading(reading) {
     parts.push(`precision ${reading.repeatabilityScore || 0}%`);
     parts.push(reading.trustVerdict || `${reading.samples} samples`);
   } else if (reading.workflow === 'caster') {
-    // CASTER: surface the steer angle and the SIGN CAVEAT so the value is never read as a trusted
-    // absolute sign without validation.
+    // CASTER: surface the steer angle, the realistic-accuracy floor (so the ± band is not read as a
+    // tighter-than-real read-noise number), and the SIGN CAVEAT.
     parts.push(`camber swing • ±${formatNumber(reading.casterSteerAngle || 0)}° steer`);
+    parts.push('realistic ±0.5–1°');
     parts.push('validate sign vs known reference');
   } else {
     parts.push(`${reading.confidence}% confidence`);
@@ -3119,7 +3134,7 @@ function specNoteForReading(reading) {
     return reading.trustVerdict || 'Precision saved';
   }
   if (reading.workflow === 'caster') {
-    return `Camber swing • ±${formatNumber(reading.casterSteerAngle || 0)}° • validate sign`;
+    return `Camber swing • ±${formatNumber(reading.casterSteerAngle || 0)}° • realistic ±0.5–1° • validate sign`;
   }
   return `${reading.confidence}% confidence`;
 }
@@ -3270,11 +3285,14 @@ function refreshSavedReadings() {
       if (item.trustVerdict) metaParts.push(`${item.trustVerdict} (n=${item.captureCount || item.samples || 0})`);
       if (item.reversalBias !== null && item.reversalBias !== undefined) metaParts.push(`bias ${formatSigned(item.reversalBias)}`);
     } else if (item.workflow === 'caster') {
-      // CASTER: surface the steer angle, the OUT/IN camber reads, and the SIGN CAVEAT.
+      // CASTER: surface the steer angle, the OUT/IN camber reads, the realistic-accuracy floor (the
+      // ± band is floored at the documented honest accuracy, not the bare read-noise term), and the
+      // SIGN CAVEAT.
       metaParts.push(`camber swing • ±${formatNumber(item.casterSteerAngle || 0)}° steer`);
       if (Number.isFinite(item.casterCamberOut) && Number.isFinite(item.casterCamberIn)) {
         metaParts.push(`out ${formatSigned(item.casterCamberOut)} / in ${formatSigned(item.casterCamberIn)}`);
       }
+      metaParts.push('realistic ±0.5–1°');
       metaParts.push('validate sign vs known reference');
     } else {
       metaParts.push(`${item.confidence}% confidence`);
