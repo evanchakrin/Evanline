@@ -9,7 +9,7 @@
   <meta name="theme-color" content="#0d1117" />
   <link rel="manifest" href="manifest.json" />
   <title>Evanline – Wheel Alignment</title>
-    <link rel="stylesheet" href="assets/css/styles.css?v=12" />
+    <link rel="stylesheet" href="assets/css/styles.css?v=13" />
 
 </head>
 <body>
@@ -132,6 +132,133 @@
       <strong id="readiness-next">Enable sensors</strong>
       <small id="readiness-next-sub">Follow the guide</small>
     </div>
+  </div>
+
+  <div class="gauge-card toe-wizard hidden-panel" id="toe-wizard">
+    <span class="gauge-label">Geometric toe wizard</span>
+    <div class="guide-step">Measure toe geometrically</div>
+    <p class="guide-text">A phone cannot sense toe. Enter measured rim/plate gaps and the app is the calculator + uncertainty engine. Toe-in is positive. Target accuracy ~0.1–0.3°.</p>
+
+    <div class="mode-explainer" role="note">
+      <strong>Runout is the dominant error.</strong>
+      <span id="toe-runout-headline">Roll the wheel ~180°, re-seat, and measure twice. The app refuses a single read and averages the two so rim runout cancels. Reference the rim, never the tire sidewall or lettering.</span>
+    </div>
+
+    <details class="panel-section" open id="toe-setup-section">
+      <summary>1 · Setup (required)</summary>
+      <div class="panel-section-content">
+        <div class="toe-field-grid">
+          <label class="toe-field">
+            <span>Reference span / diameter D</span>
+            <input class="form-input" type="number" inputmode="decimal" step="any" min="0" id="toe-diameter" data-action="toeInput" data-arg="diameter" placeholder="measured pickup span" />
+            <small>Enter a MEASURED span (plate height or rim mark spacing), not a nominal lookup. Output scales as 1/D.</small>
+          </label>
+          <label class="toe-field">
+            <span>Units</span>
+            <select class="form-select" id="toe-units" data-action="toeInput" data-arg="units">
+              <option value="mm">mm</option>
+              <option value="in">in</option>
+            </select>
+          </label>
+          <label class="toe-field">
+            <span>Spec type</span>
+            <select class="form-select" id="toe-spec-type" data-action="toeInput" data-arg="specType">
+              <option value="total">Total axle</option>
+              <option value="perWheel">Per-wheel</option>
+            </select>
+          </label>
+          <label class="toe-field">
+            <span>Spec quoted at diameter</span>
+            <input class="form-input" type="number" inputmode="decimal" step="any" min="0" id="toe-spec-diameter" data-action="toeInput" data-arg="specDiameter" placeholder="e.g. 28.648 in" />
+            <small>The diameter the LINEAR spec assumes. Never show a linear toe without it.</small>
+          </label>
+          <label class="toe-field">
+            <span>Read uncertainty u</span>
+            <input class="form-input" type="number" inputmode="decimal" step="any" min="0" id="toe-read-uncertainty" data-action="toeInput" data-arg="readUncertainty" placeholder="0.8 mm = 1/32 in" />
+            <small>Default 0.8 mm (1/32 in). Same units as D.</small>
+          </label>
+        </div>
+      </div>
+    </details>
+
+    <div class="toe-method-tabs" role="tablist" aria-label="Toe method">
+      <button class="toe-method-tab active" id="toe-method-plates" data-action="setToeMethod" data-arg="plates" role="tab" aria-selected="true">Plates / tapes</button>
+      <button class="toe-method-tab" id="toe-method-tape" data-action="setToeMethod" data-arg="tape" role="tab" aria-selected="false">Tape only (fallback)</button>
+    </div>
+    <p class="guide-text" id="toe-method-hint">Plates + 2 tapes give TOTAL axle toe directly: measure the gap between the plates at the FRONT (F) and REAR (R) of the front tires over span D.</p>
+
+    <div class="warning-text" id="toe-settle-hint" role="note">Settle hygiene: roll straight forward, bounce the suspension to settle, and reference the RIM not the tire sidewall/lettering.</div>
+
+    <div class="toe-reads">
+      <div class="toe-read-pair">
+        <span class="toe-read-title">Read-pair A (first seating)</span>
+        <div class="toe-pair-inputs">
+          <label class="toe-field">
+            <span id="toe-front-label-1">Front gap F</span>
+            <input class="form-input" type="number" inputmode="decimal" step="any" id="toe-front-1" data-action="toeInput" data-arg="front1" placeholder="F" />
+          </label>
+          <label class="toe-field">
+            <span id="toe-rear-label-1">Rear gap R</span>
+            <input class="form-input" type="number" inputmode="decimal" step="any" id="toe-rear-1" data-action="toeInput" data-arg="rear1" placeholder="R" />
+          </label>
+        </div>
+      </div>
+      <div class="toe-read-pair">
+        <span class="toe-read-title">Read-pair B (after ~180° roll &amp; re-seat)</span>
+        <div class="toe-pair-inputs">
+          <label class="toe-field">
+            <span id="toe-front-label-2">Front gap F</span>
+            <input class="form-input" type="number" inputmode="decimal" step="any" id="toe-front-2" data-action="toeInput" data-arg="front2" placeholder="F" />
+          </label>
+          <label class="toe-field">
+            <span id="toe-rear-label-2">Rear gap R</span>
+            <input class="form-input" type="number" inputmode="decimal" step="any" id="toe-rear-2" data-action="toeInput" data-arg="rear2" placeholder="R" />
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <div class="toe-result" id="toe-result">
+      <div class="status-chip">
+        <span class="status-chip-label">Total axle toe</span>
+        <span class="status-chip-value" id="toe-total-value">—</span>
+        <span class="status-chip-sub" id="toe-total-sub">Enter both read-pairs to compute.</span>
+      </div>
+      <div class="status-chip">
+        <span class="status-chip-label">Per-wheel (= total / 2)</span>
+        <span class="status-chip-value" id="toe-perwheel-value">—</span>
+        <span class="status-chip-sub" id="toe-perwheel-sub">Assumes left–right symmetry — plates cannot split L vs R.</span>
+      </div>
+      <div class="status-chip">
+        <span class="status-chip-label">Linear equivalent</span>
+        <span class="status-chip-value" id="toe-linear-value">—</span>
+        <span class="status-chip-sub" id="toe-linear-sub">At the quoted spec diameter.</span>
+      </div>
+      <div class="status-chip">
+        <span class="status-chip-label">Runout check</span>
+        <span class="status-chip-value" id="toe-runout-value">—</span>
+        <span class="status-chip-sub" id="toe-runout-sub">Disagreement between the two read-pairs.</span>
+      </div>
+    </div>
+
+    <div class="warning-text" id="toe-verdict" role="status" aria-live="polite">Enter setup and both read-pairs to compute toe.</div>
+
+    <div class="toe-save-row">
+      <label class="toe-field toe-save-side">
+        <span>Save to side(s)</span>
+        <select class="form-select" id="toe-save-side" data-action="toeInput" data-arg="saveSide">
+          <option value="front">Front pair (FL + FR)</option>
+          <option value="rear">Rear pair (RL + RR)</option>
+          <option value="FL">FL</option>
+          <option value="FR">FR</option>
+          <option value="RL">RL</option>
+          <option value="RR">RR</option>
+        </select>
+      </label>
+      <button class="btn btn-primary btn-small" id="btn-save-toe" data-action="saveToeMeasurement">Save toe reading</button>
+      <button class="btn btn-surface btn-small" id="btn-reset-toe" data-action="resetToeWizard">Reset wizard</button>
+    </div>
+    <div class="control-hint" id="toe-save-hint">Total toe saves to the front (or rear) pair under the symmetry flag; per-wheel saves the entered side.</div>
   </div>
 
   <div class="gauge-card precision-card hidden-panel" id="precision-card">
@@ -565,7 +692,7 @@
   <div class="instr-spacer"></div>
 </div>
 
-<script type="module" src="assets/js/app.js?v=12"></script>
+<script type="module" src="assets/js/app.js?v=13"></script>
 
 <dialog id="fixture-dialog" class="fixture-dialog" aria-labelledby="fixture-dialog-title">
   <form method="dialog" id="fixture-form" class="fixture-form">

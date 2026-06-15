@@ -36,6 +36,8 @@ import {
   toeAngleFromOffset,
   toeAngleToLinear,
   toeReadUncertaintyDeg,
+  toeRunoutDisagreement,
+  computeToeWizardResult,
   toleranceHalfWidth,
   totalToeFromPlates,
   perWheelFromTotal,
@@ -663,6 +665,33 @@ test('normalizeMeasurement preserves context stamps and bounded history (P2-5)',
   assert.deepEqual(many.history.map(h => h.value), [4, 5, 6]);
 });
 
+test('normalizeMeasurement round-trips a geometric toe reading and its toe stamps', () => {
+  const toe = normalizeMeasurement({
+    mode: 'toe', side: 'FL', value: 0.12, workflow: 'geometric',
+    toeMethod: 'plates', toeUnits: 'mm', toeDiameter: 381, toeSpecDiameter: 381,
+    toeTotal: 0.12, toePerWheel: 0.06, toeLinear: 0.8,
+    toeSymmetryAssumed: true, toeRunoutDisagreement: 0.04, toeRunoutFault: false,
+  }, 'NOW');
+  // The 'geometric' workflow survives (no longer coerced to 'quick').
+  assert.equal(toe.workflow, 'geometric');
+  assert.equal(toe.toeMethod, 'plates');
+  assert.equal(toe.toeUnits, 'mm');
+  assert.equal(toe.toeDiameter, 381);
+  assert.equal(toe.toeTotal, 0.12);
+  assert.equal(toe.toePerWheel, 0.06);
+  assert.equal(toe.toeSymmetryAssumed, true);
+  assert.equal(toe.toeRunoutDisagreement, 0.04);
+  assert.equal(toe.toeRunoutFault, false);
+  // A legacy sensor reading carries null/false for every toe field and keeps its workflow.
+  const legacy = normalizeMeasurement({ mode: 'camber', side: 'FR', value: 1.0, workflow: 'precision' }, 'NOW');
+  assert.equal(legacy.workflow, 'precision');
+  assert.equal(legacy.toeMethod, null);
+  assert.equal(legacy.toeSymmetryAssumed, false);
+  assert.equal(legacy.toeRunoutFault, false);
+  // An unknown workflow string still falls back to 'quick'.
+  assert.equal(normalizeMeasurement({ mode: 'level', side: 'RL', value: 0, workflow: 'bogus' }, 'NOW').workflow, 'quick');
+});
+
 test('normalizeBaselinePoint coerces quality fields and defaults the time (P2-5)', () => {
   const p = normalizeBaselinePoint({ value: 0.1, confidence: 80, orientation: 'landscape' }, 'NOW');
   assert.equal(p.value, 0.1);
@@ -773,4 +802,80 @@ test('toeReadUncertaintyDeg propagates u/D with sqrt(2) for the differential and
   assert.equal(toeReadUncertaintyDeg(NaN, 381), null);
   assert.equal(toeReadUncertaintyDeg(0.8, 0), null);
   assert.equal(toeReadUncertaintyDeg(0.8, -381), null);
+});
+
+test('toeRunoutDisagreement flags read-pair disagreement and refuses a single read', () => {
+  // Both finite + within threshold => ready, does not exceed.
+  const ok = toeRunoutDisagreement(0.20, 0.30, 0.25);
+  assert.equal(ok.ready, true);
+  assert.ok(Math.abs(ok.disagreement - 0.10) < 1e-12);
+  assert.equal(ok.exceeds, false);
+  // Beyond threshold => exceeds (runout/seating fault).
+  const bad = toeRunoutDisagreement(0.10, 0.50, 0.25);
+  assert.equal(bad.exceeds, true);
+  assert.ok(Math.abs(bad.disagreement - 0.40) < 1e-12);
+  // A missing second read is not ready (single-read refusal).
+  const single = toeRunoutDisagreement(0.20, NaN, 0.25);
+  assert.equal(single.ready, false);
+  assert.equal(single.disagreement, null);
+  assert.equal(single.exceeds, false);
+  // Default threshold is 0.25 deg.
+  assert.equal(toeRunoutDisagreement(0, 0.3).exceeds, true);
+  assert.equal(toeRunoutDisagreement(0, 0.2).exceeds, false);
+});
+
+test('computeToeWizardResult refuses a single read and needs a positive diameter', () => {
+  const setup = { method: 'plates', diameter: 28.648, specDiameter: 28.648, readUncertainty: 0.8 };
+  // No diameter => not ready, with guidance.
+  const noD = computeToeWizardResult({ ...setup, diameter: 0 }, [{ front: 0, rear: 1 }, { front: 0, rear: 1 }]);
+  assert.equal(noD.ready, false);
+  assert.match(noD.reason, /reference diameter/);
+  // Zero pairs => not ready (asks for the first pair).
+  const none = computeToeWizardResult(setup, []);
+  assert.equal(none.ready, false);
+  assert.match(none.reason, /first read-pair/);
+  // One pair only => still not ready (forced roll-and-average).
+  const one = computeToeWizardResult(setup, [{ front: 0, rear: 1 }]);
+  assert.equal(one.ready, false);
+  assert.match(one.reason, /second read-pair/);
+});
+
+test('computeToeWizardResult averages the two read-pairs into total + per-wheel toe', () => {
+  const setup = { method: 'plates', diameter: 28.648, specDiameter: 28.648, readUncertainty: 0.8 };
+  // Two pairs that each give the "1 inch = ~2 deg" self-check total; average is the same.
+  const res = computeToeWizardResult(setup, [{ front: 0, rear: 1 }, { front: 0, rear: 1 }]);
+  assert.equal(res.ready, true);
+  assert.equal(res.method, 'plates');
+  assert.ok(Math.abs(res.totalToe - 1.999) < 1e-3);
+  // Per-wheel is exactly half the total (symmetry assumption).
+  assert.ok(Math.abs(res.perWheelToe - res.totalToe / 2) < 1e-12);
+  // The average sits between two unequal read-pair angles.
+  const mixed = computeToeWizardResult(setup, [{ front: 0, rear: 0 }, { front: 0, rear: 1 }]);
+  const a0 = totalToeFromPlates(0, 0, 28.648);
+  const a1 = totalToeFromPlates(1, 0, 28.648);
+  assert.ok(Math.abs(mixed.totalToe - (a0 + a1) / 2) < 1e-12);
+  // Toe-in (rear > front) is positive; toe-out negative.
+  assert.ok(computeToeWizardResult(setup, [{ front: 0, rear: 1 }, { front: 0, rear: 1 }]).totalToe > 0);
+  assert.ok(computeToeWizardResult(setup, [{ front: 1, rear: 0 }, { front: 1, rear: 0 }]).totalToe < 0);
+});
+
+test('computeToeWizardResult surfaces the band, linear equivalent, and runout disagreement', () => {
+  const setup = { method: 'plates', diameter: 381, specDiameter: 381, readUncertainty: 0.8, runoutThreshold: 0.25 };
+  // Agreeing pairs: band = differential u/D, linear = specDiameter * tan(total), runout within limit.
+  const res = computeToeWizardResult(setup, [{ front: 0, rear: 1 }, { front: 0, rear: 1 }]);
+  const expectedBand = toeReadUncertaintyDeg(0.8, 381, true);
+  assert.ok(Math.abs(res.toleranceDeg - expectedBand) < 1e-12);
+  assert.ok(Math.abs(res.totalLinear - toeAngleToLinear(res.totalToe, 381)) < 1e-12);
+  assert.ok(Math.abs(res.perWheelLinear - toeAngleToLinear(res.perWheelToe, 381)) < 1e-12);
+  assert.equal(res.runout.exceeds, false);
+  // Disagreeing pairs trip the runout flag and the reason calls out re-seating.
+  const faulty = computeToeWizardResult(setup, [{ front: 0, rear: 1 }, { front: 0, rear: 20 }]);
+  assert.equal(faulty.runout.exceeds, true);
+  assert.match(faulty.reason, /Runout/);
+  // No spec diameter => no linear equivalent, but the angle still resolves.
+  const noSpec = computeToeWizardResult({ method: 'tape', diameter: 381, readUncertainty: 0.8 }, [{ front: 0, rear: 1 }, { front: 0, rear: 1 }]);
+  assert.equal(noSpec.ready, true);
+  assert.equal(noSpec.method, 'tape');
+  assert.equal(noSpec.totalLinear, null);
+  assert.equal(noSpec.perWheelLinear, null);
 });
