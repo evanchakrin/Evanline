@@ -49,8 +49,10 @@ export function pitchDeg(g) {
   return Math.atan2(g.y, Math.hypot(g.x, g.z)) * 180 / Math.PI;
 }
 
-// Map a measurement mode onto its gravity-vector inclination. Toe is handled in a
-// later stage so it returns null here. Returns null when gravity is missing/non-finite.
+// Map a measurement mode onto its gravity-vector inclination. Toe is geometric so it returns
+// null. CASTER's live reading IS camber: the caster measurement is recovered from how the camber
+// reading changes between two steer positions (same upright-against-wheel pose as camber), so
+// inclinationForMode('caster') returns the camber roll. Returns null when gravity is missing.
 export function inclinationForMode(mode, g) {
   if (!finiteGravity(g)) return null;
   if (mode === 'level') return levelDeg(g);
@@ -60,10 +62,11 @@ export function inclinationForMode(mode, g) {
 }
 
 // P0-4: physical-pose family for a mode, derived from where gravity is expected to point
-// in the device frame (NOT the screen aspect ratio). Camber/toe are read with the phone
+// in the device frame (NOT the screen aspect ratio). Camber/toe/caster are read with the phone
 // upright (gravity along ±y); level/pitch are read with the phone flat (gravity along ±z).
+// Caster reuses the camber pose because each caster capture is a camber read at a steer position.
 export function poseFamilyForMode(mode) {
-  return (mode === 'camber' || mode === 'toe') ? 'upright' : 'flat';
+  return (mode === 'camber' || mode === 'toe' || mode === 'caster') ? 'upright' : 'flat';
 }
 
 // P0-4: is the phone in the right PHYSICAL pose for this mode? Replaces the old aspect-ratio
@@ -206,7 +209,7 @@ export function normalizeCalibrationMeta(item) {
 // GEOMETRIC TOE (Stage 2): the 'geometric' workflow and the toe* stamps are preserved here so a
 // saved geometric toe reading round-trips through storage; legacy/sensor readings carry null/false
 // for every toe field, so nothing changes for camber/level/pitch or pre-existing data.
-const KNOWN_WORKFLOWS = ['quick', 'precision', 'geometric'];
+const KNOWN_WORKFLOWS = ['quick', 'precision', 'geometric', 'caster'];
 // GEOMETRIC TOE methods that round-trip through storage: the quick plates/tape paths (TOTAL toe)
 // and the Stage 3 PRECISION 'string-box' path (per-wheel + thrust). Anything else coerces to null.
 const TOE_METHODS = ['plates', 'tape', 'string-box'];
@@ -266,6 +269,11 @@ export function normalizeMeasurement(item = {}, nowIso = new Date().toISOString(
     toeSymmetryAssumed: item.toeSymmetryAssumed === true,
     toeRunoutDisagreement: Number.isFinite(item.toeRunoutDisagreement) ? Number(item.toeRunoutDisagreement) : null,
     toeRunoutFault: item.toeRunoutFault === true,
+    // CASTER context stamps (null on every non-caster reading): the steer angle and the two raw
+    // camber reads the swing was computed from, so a saved caster value is self-describing.
+    casterSteerAngle: Number.isFinite(item.casterSteerAngle) ? Number(item.casterSteerAngle) : null,
+    casterCamberOut: Number.isFinite(item.casterCamberOut) ? Number(item.casterCamberOut) : null,
+    casterCamberIn: Number.isFinite(item.casterCamberIn) ? Number(item.casterCamberIn) : null,
     history,
   };
 }
@@ -887,4 +895,127 @@ export function headingTrust({
     return { trusted: false, heading: null, accuracy: null, reason: 'no-heading' };
   }
   return { trusted: false, heading: null, accuracy: null, reason: 'relative' };
+}
+
+// --- CASTER (turning-angle / camber-swing method) ----------------------------------------------
+// Caster is NOT readable from a single static gravity reading, but it is recoverable from how the
+// CAMBER changes as the wheel is steered. Steer the wheel a known angle each way and read the
+// existing gravity CAMBER (camberDeg / the settling pipeline, phone flush against the wheel face)
+// at each steer position. These helpers are PURE — they take the two camber numbers the sensor
+// pipeline already produced and turn them into a caster angle + uncertainty band.
+//
+// FORMULA: caster = (camberOut - camberIn) / (2 * sin(steerAngleDeg)), where steerAngleDeg is the
+// steer angle from straight-ahead on EACH side (total swing = 2*steerAngleDeg). camberOut is the
+// camber with the wheel steered OUTWARD, camberIn the camber steered INWARD. The classic 20° each
+// way gives 2*sin(20°) = 0.6840, so a 2° camber swing reads ~2.924° of caster.
+//
+// SELF-CALIBRATION: caster is a DIFFERENCE of two camber reads, so any constant camber zero offset
+// CANCELS in the subtraction. Caster therefore needs NO zeroing step — capture RAW camber at both
+// positions and the offset drops out.
+//
+// SIGN CAVEAT: positive caster = top of the steering axis tilted rearward. The out/in and per-side
+// (FL vs FR) sign convention depends on which way "outward" steer rotates the wheel face relative to
+// the phone; the MAGNITUDE is robust, but the absolute SIGN should be validated against a known-
+// caster reference before trusting it. See casterBandDeg for the uncertainty.
+export function casterFromCamberSwing(camberOut, camberIn, steerAngleDeg) {
+  if (!Number.isFinite(camberOut) || !Number.isFinite(camberIn) || !Number.isFinite(steerAngleDeg)) return null;
+  if (steerAngleDeg <= 0) return null;
+  const sinTheta = Math.sin(degToRad(steerAngleDeg));
+  if (!(Math.abs(sinTheta) > 1e-9)) return null;
+  return (camberOut - camberIn) / (2 * sinTheta);
+}
+
+// Propagated +/- band (DEGREES) for a caster read. Two terms combine in quadrature:
+//   1. READ-NOISE term: each camber read carries a +/- band camberBandDeg; the caster is a
+//      DIFFERENCE of two such reads divided by 2*sin(theta), so the band scales by
+//      camberBandDeg * sqrt(2) / (2*sin(theta)). At 20° this is camberBandDeg * 1.414 / 0.684 ~=
+//      2.07x — the caster band is ~2x the per-read camber band.
+//   2. TURN-ANGLE term: a steer-angle error d(theta) scales caster by ~ -cot(theta) * d(theta)
+//      (a few % per degree at 20°). Without the caster magnitude we cannot size the absolute
+//      degrees this contributes, so it is folded in RELATIVE to the read-noise term: it inflates
+//      the band by the fractional turn-angle sensitivity cot(theta) * d(theta_rad). This keeps the
+//      helper dependency-free (no caster value needed) while still surfacing turn-angle sensitivity.
+// Returns null on non-finite camberBandDeg / steerAngleDeg, steerAngleDeg <= 0, or sin ~ 0. The
+// turn-angle uncertainty defaults to 0 (read-noise only). REALISTIC accuracy ~ +/-0.5 to 1°.
+export function casterBandDeg(camberBandDeg, steerAngleDeg, steerAngleUncertaintyDeg = 0) {
+  if (!Number.isFinite(camberBandDeg) || !Number.isFinite(steerAngleDeg)) return null;
+  if (steerAngleDeg <= 0) return null;
+  const theta = degToRad(steerAngleDeg);
+  const sinTheta = Math.sin(theta);
+  if (!(Math.abs(sinTheta) > 1e-9)) return null;
+  // Read-noise term: the dominant, caster-value-independent uncertainty.
+  const readTerm = Math.abs(camberBandDeg) * Math.SQRT2 / (2 * sinTheta);
+  // Turn-angle term: fractional sensitivity cot(theta) * d(theta) applied to the read-noise term.
+  const dTheta = Number.isFinite(steerAngleUncertaintyDeg) ? Math.abs(degToRad(steerAngleUncertaintyDeg)) : 0;
+  const cotTheta = Math.cos(theta) / sinTheta;
+  const turnTerm = readTerm * Math.abs(cotTheta) * dTheta;
+  return Math.hypot(readTerm, turnTerm);
+}
+
+// PURE orchestrator for the caster CAPTURE flow: turns the two settled camber reads (steered OUT
+// and steered IN), their per-read camber +/- bands, and the steer angle into a ready-to-save
+// caster result. It composes casterFromCamberSwing + casterBandDeg so the app layer holds no
+// caster math. Inputs:
+//   camberOut / camberIn  — the two settled camber reads (RAW camber is fine; the zero CANCELS in
+//                           the difference, so NO zeroing step is needed for caster).
+//   steerAngleDeg         — steer from straight-ahead on EACH side (default flow uses 20°).
+//   camberBandOut/In      — optional per-read +/- bands; the larger drives the read-noise term so a
+//                           noisier capture is not hidden (falls back to the other / 0).
+//   steerAngleUncertaintyDeg — optional turn-plate read error folded into the band (default 0).
+// Returns { ready, caster, toleranceDeg, reason, hasOut, hasIn }. ready is false (with a reason)
+// until BOTH captures exist and the math is finite. caster MAGNITUDE is robust; the absolute SIGN
+// must be validated against a known-caster reference (the SIGN CAVEAT — surfaced by the caller).
+export function casterSwingResult({
+  camberOut = null,
+  camberIn = null,
+  steerAngleDeg = 20,
+  camberBandOut = null,
+  camberBandIn = null,
+  steerAngleUncertaintyDeg = 0,
+} = {}) {
+  const hasOut = Number.isFinite(camberOut);
+  const hasIn = Number.isFinite(camberIn);
+  if (!Number.isFinite(steerAngleDeg) || steerAngleDeg <= 0) {
+    return { ready: false, caster: null, toleranceDeg: null, reason: 'Enter a steer angle greater than 0°.', hasOut, hasIn };
+  }
+  if (!hasOut && !hasIn) {
+    return { ready: false, caster: null, toleranceDeg: null, reason: 'Capture camber steered OUT and steered IN.', hasOut, hasIn };
+  }
+  if (!hasOut) {
+    return { ready: false, caster: null, toleranceDeg: null, reason: 'Capture camber steered OUT.', hasOut, hasIn };
+  }
+  if (!hasIn) {
+    return { ready: false, caster: null, toleranceDeg: null, reason: 'Capture camber steered IN.', hasOut, hasIn };
+  }
+  const caster = casterFromCamberSwing(camberOut, camberIn, steerAngleDeg);
+  if (caster === null) {
+    return { ready: false, caster: null, toleranceDeg: null, reason: 'Caster is undefined for this steer angle.', hasOut, hasIn };
+  }
+  // The read-noise band scales with the per-read camber band; take the worst of the two captures so
+  // a noisier read drives the propagated band. Missing bands fall back to 0 (best-case).
+  const bands = [camberBandOut, camberBandIn].filter(Number.isFinite).map(Math.abs);
+  const camberBand = bands.length ? Math.max(...bands) : 0;
+  const toleranceDeg = casterBandDeg(camberBand, steerAngleDeg, steerAngleUncertaintyDeg);
+  return {
+    ready: true,
+    caster,
+    toleranceDeg: Number.isFinite(toleranceDeg) ? toleranceDeg : null,
+    reason: 'Caster computed from the camber swing. Validate the sign against a known reference.',
+    hasOut,
+    hasIn,
+  };
+}
+
+// HONEST PERSISTED caster band. casterSwingResult.toleranceDeg is ONLY the propagated camber
+// read-noise term (~±0.1–0.2° for a settled phone), which under-states the true camber-swing caster
+// accuracy by 5–10x — turn-plate angle error, phone-to-wheel-face seating, and tyre deflection all
+// add uncertainty the read-noise term cannot see. The realistic accuracy is ~±0.5 to 1°. When the
+// caster is SAVED (and the live verdict that surfaces that floor disappears), the persisted band must
+// not read tighter than the documented honest accuracy. This returns max(propagated, floor): the
+// read-noise term is kept as a LOWER bound (it wins only when it is itself larger than the floor), so
+// the saved "value ± band (95%)" is never falsely tight. Non-finite propagated band => the floor.
+export function casterPersistedBandDeg(propagatedBandDeg, realisticFloorDeg) {
+  const floor = Number.isFinite(realisticFloorDeg) ? Math.abs(realisticFloorDeg) : 0;
+  const propagated = Number.isFinite(propagatedBandDeg) ? Math.abs(propagatedBandDeg) : 0;
+  return Math.max(propagated, floor);
 }

@@ -8,6 +8,8 @@ import {
   computeSampleQuality,
   computeToeWizardResult,
   computeToeStringBoxResult,
+  casterSwingResult,
+  casterPersistedBandDeg,
   deltaContextMatch,
   flipSelfTest,
   gravityFromEuler,
@@ -35,7 +37,7 @@ import {
 
 // v3 adds workflow/session objects beyond the older v2 zero + readings payload, so loadState() migrates legacy data forward on first read.
 const STORAGE_KEY = 'evanline-state-v3';
-const MODES = ['level', 'camber', 'toe', 'pitch'];
+const MODES = ['level', 'camber', 'toe', 'pitch', 'caster'];
 const SIDES = ['FL', 'FR', 'RL', 'RR'];
 const MAX_STORED_MEASUREMENTS = 32;
 const MAX_FIXTURE_PROFILES = 12;
@@ -54,6 +56,9 @@ const MODE_LABELS = {
   toe: 'Toe (geometric)',
   level: 'Level (Left / Right)',
   pitch: 'Pitch Angle (Front / Back)',
+  // CASTER is not a static gravity reading: it is recovered from how CAMBER changes between two
+  // steer positions, so it is labelled "swing" and lives in its own two-capture workflow pane.
+  caster: 'Caster (camber swing)',
 };
 // placement/orientation/calibration copy for the guided workflow card
 const MODE_GUIDES = {
@@ -78,6 +83,15 @@ const MODE_GUIDES = {
     placement: 'Placement: Front-to-back on a flat reference surface',
     orientation: 'Landscape',
     calibration: 'Zero on a known flat reference before checking pitch or driveway slope.',
+  },
+  caster: {
+    // Caster is a camber-swing measurement: hold the phone flush to the wheel face (camber pose)
+    // and capture camber at two steer positions. The caster pane below IS the workflow.
+    placement: 'Caster: flush to the wheel face — capture camber steered OUT and steered IN',
+    orientation: 'Portrait',
+    // SELF-CALIBRATION: caster is a DIFFERENCE of two camber reads, so the camber zero cancels.
+    // No "Zero this mode" step — capture RAW camber at both steer positions.
+    calibration: 'No zeroing needed — caster is a difference of two camber reads, so the zero cancels.',
   },
 };
 const CX = 150, CY = 168, R = 126;
@@ -134,6 +148,13 @@ const MEASUREMENT_HISTORY_DEPTH = 4;
 // must agree within this many degrees before a save is trusted.
 const TOE_DEFAULT_READ_UNCERTAINTY = { mm: 0.8, in: 0.8 / 25.4 };
 const TOE_RUNOUT_THRESHOLD_DEG = 0.25;
+// CASTER honest accuracy floor. casterSwingResult.toleranceDeg is ONLY the propagated camber
+// read-noise band (~±0.1–0.2° for a settled phone). That under-states the true camber-swing caster
+// accuracy by 5–10x: turn-plate angle error, phone-to-wheel-face seating, and tyre deflection all add
+// uncertainty the read-noise term cannot see. The documented realistic accuracy is ~±0.5–1°, so the
+// PERSISTED band (what the saved card prominently shows once the live verdict is gone) is floored here
+// — the propagated read-noise stays as the lower bound, never presented as the total 95% accuracy.
+const CASTER_REALISTIC_FLOOR_DEG = 0.5;
 
 const state = {
   mode: 'level',
@@ -206,7 +227,20 @@ const state = {
   // diameter/units/spec/read-uncertainty; reads holds the two forced read-pairs (roll-and-average);
   // method picks plates vs tape; saveSide maps the result onto the FL/FR/RL/RR measurements model.
   toeWizard: defaultToeWizard(),
+  // CASTER capture flow: steerAngle is the steer-from-straight angle on EACH side (turn-plate
+  // marking; default 20°); side targets a FRONT wheel (FL/FR); captures.out / captures.in each
+  // hold a SETTLED camber snapshot { camber, band } taken at that steer position. Caster is then
+  // (camberOut − camberIn) / (2 sin θ). NO zero step (the camber offset cancels in the difference).
+  caster: defaultCaster(),
 };
+
+function defaultCaster() {
+  return {
+    steerAngle: 20,
+    side: 'FL',
+    captures: { out: null, in: null },
+  };
+}
 
 function defaultToeWizard() {
   return {
@@ -252,6 +286,30 @@ function restoreToeWizardSetup(stored) {
   return wizard;
 }
 
+// CASTER: tolerant migration of the persisted caster SETUP (steer angle + target side). The two
+// settled camber captures are transient (never persisted), so they always restore empty.
+function restoreCasterSetup(stored) {
+  const caster = defaultCaster();
+  if (!stored || typeof stored !== 'object') return caster;
+  caster.steerAngle = Number.isFinite(stored.steerAngle) && stored.steerAngle > 0 ? stored.steerAngle : 20;
+  // Caster is a FRONT-wheel measurement, so only FL/FR are valid targets.
+  caster.side = stored.side === 'FR' ? 'FR' : 'FL';
+  return caster;
+}
+
+// CASTER: the pure orchestrator result for the current two captures + steer angle. Sensor-free
+// math (the camber reads come from the settling pipeline); composes casterSwingResult.
+function casterResult() {
+  const c = state.caster;
+  return casterSwingResult({
+    camberOut: c.captures.out?.camber ?? null,
+    camberIn: c.captures.in?.camber ?? null,
+    steerAngleDeg: c.steerAngle,
+    camberBandOut: c.captures.out?.band ?? null,
+    camberBandIn: c.captures.in?.band ?? null,
+  });
+}
+
 // GEOMETRIC TOE: the pure orchestrator result for the current wizard inputs (sensor-free).
 function toeWizardResult() {
   const w = state.toeWizard;
@@ -277,11 +335,13 @@ function toeStringBoxResult() {
 }
 
 function defaultOffsets() {
-  return { camber: 0, toe: 0, level: 0, pitch: 0 };
+  // Caster needs no zero (the camber offset cancels in the swing difference) but keeps a slot so
+  // the MODES loops in loadState stay uniform; it simply never receives a non-zero offset.
+  return { camber: 0, toe: 0, level: 0, pitch: 0, caster: 0 };
 }
 
 function defaultCalibrationMeta() {
-  return { camber: null, toe: null, level: null, pitch: null };
+  return { camber: null, toe: null, level: null, pitch: null, caster: null };
 }
 
 function defaultPrecisionSession() {
@@ -483,6 +543,11 @@ function directionLabel(angleDeg) {
     // P0-2: never present a toe-in/out direction — the sensor cannot measure toe. Toe mode has no
     // gravity-derived reading (inclinationForMode('toe') === null), so this is a fixed reminder.
     return '— Toe is geometric (not a sensor reading)';
+  }
+  if (state.mode === 'caster') {
+    // Caster mode's live reading IS camber (at the current steer position). The needle shows that
+    // camber so the user can settle each capture; caster itself comes from the OUT−IN difference.
+    return angleDeg > DIRECTION_DEADBAND_DEG ? '▲ Camber (steered) +' : angleDeg < -DIRECTION_DEADBAND_DEG ? '▼ Camber (steered) −' : '— Camber (steered)';
   }
   return angleDeg > DIRECTION_DEADBAND_DEG ? '↑ Nose Up' : angleDeg < -DIRECTION_DEADBAND_DEG ? '↓ Nose Down' : '— Flat';
 }
@@ -898,6 +963,8 @@ function loadState() {
       .map(item => normalizeMeasurement(item, new Date().toISOString(), MEASUREMENT_HISTORY_DEPTH));
     // GEOMETRIC TOE: restore the wizard SETUP tolerantly (older data simply has none -> defaults).
     state.toeWizard = restoreToeWizardSetup(parsed?.toeWizardSetup);
+    // CASTER: restore the setup (steer angle + side) tolerantly; captures are transient.
+    state.caster = restoreCasterSetup(parsed?.casterSetup);
   } catch (error) {
     state.calibrationOffsets = defaultOffsets();
     state.calibrationMeta = defaultCalibrationMeta();
@@ -907,6 +974,7 @@ function loadState() {
     state.precisionSession = defaultPrecisionSession();
     state.measurements = [];
     state.toeWizard = defaultToeWizard();
+    state.caster = defaultCaster();
     console.warn('Unable to restore saved Evanline state.', error);
     state.notice = {
       text: 'Saved calibration could not be restored. Local storage may be unavailable.',
@@ -936,6 +1004,12 @@ function saveState() {
         specDiameter: state.toeWizard.specDiameter,
         readUncertainty: state.toeWizard.readUncertainty,
         saveSide: state.toeWizard.saveSide,
+      },
+      // CASTER: persist only the SETUP (steer angle + target side); the two camber captures are
+      // transient like the toe gap reads, so a returning user keeps their steer-angle context.
+      casterSetup: {
+        steerAngle: state.caster.steerAngle,
+        side: state.caster.side,
       },
     }));
   } catch (error) {
@@ -1471,6 +1545,27 @@ function guideActionState() {
   if (!state.sensorListenerAttached) {
     return { label: 'Start Measuring', action: 'startMeasuring', reason: 'Sensor telemetry is paused until you start a measurement.' };
   }
+  // CASTER has its own two-capture flow in the caster pane and needs NO zero (the camber offset
+  // cancels in the swing), so it bypasses the level/zero/precision gates entirely. The guide just
+  // shepherds the user through OUT -> IN -> compute, and the actual capture/save live on the pane.
+  if (state.mode === 'caster') {
+    const c = state.caster;
+    if (!c.captures.out) {
+      return {
+        label: state.settled ? 'Capture steered OUT' : 'Hold steady (steered OUT)',
+        action: state.settled ? 'captureCasterOut' : 'none',
+        reason: state.settled ? `Steer ${c.side} OUT by ${formatNumber(c.steerAngle)}°, then capture camber.` : 'Steer out and hold the phone on the wheel face until camber settles.',
+      };
+    }
+    if (!c.captures.in) {
+      return {
+        label: state.settled ? 'Capture steered IN' : 'Hold steady (steered IN)',
+        action: state.settled ? 'captureCasterIn' : 'none',
+        reason: state.settled ? `Steer ${c.side} IN by ${formatNumber(c.steerAngle)}°, then capture camber.` : 'Steer in and hold the phone on the wheel face until camber settles.',
+      };
+    }
+    return { label: 'Save caster', action: 'saveCaster', reason: `Caster computed for ${c.side}. Save it (validate the sign against a known reference).` };
+  }
   if (state.workflow === 'precision' && !state.deviceProfile) {
     return {
       label: state.settled ? 'Capture device reference' : 'Hold steady for device ref',
@@ -1537,6 +1632,9 @@ function performGuideAction() {
     captureForward: () => capturePrecisionReading('forward'),
     captureReverse: () => capturePrecisionReading('reverse'),
     saveMeasurement: () => saveMeasurement(),
+    captureCasterOut: () => captureCaster('out'),
+    captureCasterIn: () => captureCaster('in'),
+    saveCaster: () => saveCasterMeasurement(),
   };
   if (handlers[action]) {
     handlers[action]();
@@ -1719,6 +1817,12 @@ function savePrecisionMeasurement() {
 }
 
 function saveMeasurement() {
+  // CASTER saves through its own two-capture pane, NOT the quick/precision sensor save path (the
+  // live reading is camber, not caster). Route any stray dispatch to the caster save instead.
+  if (state.mode === 'caster') {
+    saveCasterMeasurement();
+    return;
+  }
   if (state.workflow === 'precision') {
     savePrecisionMeasurement();
     return;
@@ -2044,6 +2148,147 @@ function saveToeMeasurement() {
   refreshUI();
 }
 
+// CASTER: a single setup edit (steer angle or target side). Changing either resets any pending
+// captures, because a half-finished swing measured at one steer angle/side cannot be mixed with a
+// new one. Setup is persisted; captures are transient.
+function setCasterInput(field, value) {
+  const c = state.caster;
+  if (field === 'steerAngle') {
+    const parsed = parseToeNumber(value);
+    const next = Number.isFinite(parsed) && parsed > 0 ? parsed : c.steerAngle;
+    if (next !== c.steerAngle) {
+      c.steerAngle = next;
+      c.captures = { out: null, in: null };
+    }
+  } else if (field === 'side') {
+    // Caster is a FRONT-wheel measurement, so only FL/FR are valid targets.
+    const next = value === 'FR' ? 'FR' : 'FL';
+    if (next !== c.side) {
+      c.side = next;
+      c.captures = { out: null, in: null };
+    }
+  } else {
+    return;
+  }
+  saveState();
+  refreshUI();
+}
+
+// CASTER: capture the current SETTLED camber read for the OUT or IN steer position. Reuses the
+// existing settling gate (state.settled) so a moving phone cannot capture, exactly like a normal
+// camber save. RAW camber is fine — caster is a DIFFERENCE so the zero cancels (NO zeroing step).
+function captureCaster(position) {
+  if (position !== 'out' && position !== 'in') return;
+  if (!state.sensorListenerAttached) {
+    setNotice('Tap Start Measuring before capturing a caster reading.', 'warn');
+    refreshUI();
+    return;
+  }
+  if (state.readingMissing) {
+    setNotice('No camber reading right now — hold the phone flush to the wheel face and try again.', 'warn');
+    refreshUI();
+    return;
+  }
+  if (!state.settled) {
+    setNotice('Hold the phone steady until the camber reading settles before capturing.', 'warn');
+    refreshUI();
+    return;
+  }
+  // The live reading in caster mode IS camber (inclinationForMode('caster') === camberDeg), so the
+  // settled average and its +/- band are the camber read + band at this steer position.
+  state.caster.captures[position] = {
+    camber: Number(sampleAverage().toFixed(3)),
+    band: Number.isFinite(state.toleranceDeg) ? Number(state.toleranceDeg.toFixed(3)) : null,
+    time: new Date().toISOString(),
+  };
+  resetLiveAveraging();
+  saveState();
+  setNotice(`Captured camber steered ${position.toUpperCase()} (${formatSigned(state.caster.captures[position].camber)}) for ${state.caster.side}.`, 'good');
+  refreshUI();
+}
+
+// CASTER: clear the two camber captures (keeps the steer-angle + side setup).
+function resetCaster() {
+  state.caster.captures = { out: null, in: null };
+  resetLiveAveraging();
+  setNotice('Caster captures cleared. Steer angle and side kept.', 'warn');
+  refreshUI();
+}
+
+// CASTER: commit the computed caster (camberOut − camberIn) / (2 sin θ) to the selected FRONT side,
+// carrying the propagated +/- band and the steer-angle/sign-caveat context. Saved like any other
+// reading so it appears in the Workflow results grid and Saved readings card. The save is driven by
+// the caster result (both captures present), never the live settle gate.
+function saveCasterMeasurement() {
+  const result = casterResult();
+  if (!result.ready) {
+    setNotice(result.reason || 'Capture camber steered OUT and steered IN before saving caster.', 'warn');
+    refreshUI();
+    return;
+  }
+  const c = state.caster;
+  const side = c.side === 'FR' ? 'FR' : 'FL';
+  // Persist the HONEST band, not the bare read-noise term. result.toleranceDeg is only the propagated
+  // camber read-noise (~±0.1–0.2°); the live verdict shows the realistic ~±0.5–1° floor, but that
+  // verdict disappears on save. casterPersistedBandDeg floors the persisted band at
+  // CASTER_REALISTIC_FLOOR_DEG so the saved card's prominent "value ± band (95%)" never reads tighter
+  // than the documented honest accuracy. (The read-noise term still wins when it is the larger.)
+  const honestBand = casterPersistedBandDeg(result.toleranceDeg, CASTER_REALISTIC_FLOOR_DEG);
+  // SIGN CAVEAT: the caster magnitude is robust, but the absolute sign depends on the steer/phone
+  // geometry and must be validated against a known-caster reference. Surface it in the verdict.
+  const trustVerdict = `Camber-swing caster • ±${formatNumber(c.steerAngle)}° steer • validate sign vs a known reference`;
+  const measurement = {
+    id: `caster-${side}`,
+    mode: 'caster',
+    side,
+    value: Number(result.caster.toFixed(2)),
+    // Caster confidence is the propagated band, not a settle %; mark it 100 so it is not penalised
+    // as "low trust" in the grid (the band + sign caveat carry the honest uncertainty).
+    confidence: 100,
+    toleranceDeg: Number(honestBand.toFixed(3)),
+    samples: 2,
+    time: new Date().toISOString(),
+    // Distinguish caster saves from sensor quick/precision and geometric toe saves.
+    workflow: 'caster',
+    rawValue: null,
+    correctedValue: null,
+    reversalBias: null,
+    repeatabilityScore: null,
+    captureCount: 2,
+    baselineQuality: null,
+    trustVerdict,
+    // Caster context stamps so the value is self-describing in the saved list.
+    casterSteerAngle: Number(c.steerAngle.toFixed(3)),
+    casterCamberOut: Number(c.captures.out.camber.toFixed(3)),
+    casterCamberIn: Number(c.captures.in.camber.toFixed(3)),
+    // No calibration applied (caster is a difference; the zero cancels). Pose/orientation stamped
+    // for parity with the other saves' delta-context guard.
+    offsetUsed: 0,
+    gainUsed: 1,
+    orientation: state.screenOrientation,
+    pose: currentPoseOrientation(),
+    deviceRefTime: null,
+    fixtureId: '',
+  };
+  commitMeasurement(measurement);
+  // Clear the captures so the next side starts clean; keep the steer-angle setup.
+  state.caster.captures = { out: null, in: null };
+  resetLiveAveraging();
+  saveState();
+  pauseSensors();
+  setSaveConfirmation(`Saved caster ${formatSigned(measurement.value)} ${formatTolerance(measurement.toleranceDeg)} to ${side} (validate sign vs a known reference).`);
+  setNotice(`Saved camber-swing caster for ${side}. Validate the sign against a known-caster reference. Measurement paused.`, 'good');
+  refreshUI();
+}
+
+// CASTER: honest L-R note for the FL/FR caster delta, shared by the saved-readings card and the
+// workflow-results grid. A cross-caster split (FL vs FR) is a real left-right difference, but the
+// absolute SIGN of each side must still be validated against a known reference.
+function casterDeltaNote(delta) {
+  if (delta === null) return 'Capture FL and FR caster to compare left vs right.';
+  return 'FL − FR caster split. Magnitudes are robust; validate each side’s sign vs a known reference.';
+}
+
 function measurementFor(mode, side) {
   return state.measurements.find(item => item.mode === mode && item.side === side) || null;
 }
@@ -2137,30 +2382,72 @@ function buildElement(tagName, className, text) {
   return element;
 }
 
+// CASTER: a self-contained guide-card state (the standard level/zero/precision pipeline does not
+// model caster). Caster needs NO zero — the card says so explicitly — and walks the user through
+// capture OUT -> capture IN -> save. Returns the same {title, description, warning, tone} shape as
+// computeGuideState; the leading step number drives the progress dots.
+function casterGuideState() {
+  const c = state.caster;
+  const notice = activeNotice();
+  if (!state.sensorsAvailable) {
+    return { title: '1. Capture camber steered OUT', description: 'Caster is recovered from a camber swing — no zeroing needed.', warning: 'Enable motion access in Safari to begin measuring.', tone: 'warn' };
+  }
+  if (notice) {
+    return { title: '1. Capture camber steered OUT', description: 'Caster is a difference of two camber reads, so the camber zero cancels — no zeroing step.', warning: notice.text, tone: notice.tone };
+  }
+  if (!state.sensorListenerAttached) {
+    return { title: '1. Capture camber steered OUT', description: 'Hold the phone flush to the wheel face (camber pose). No zeroing — the camber offset cancels in the swing.', warning: 'Sensor telemetry is paused until you tap Start Measuring.', tone: 'warn' };
+  }
+  if (!c.captures.out) {
+    return {
+      title: '1. Capture camber steered OUT',
+      description: `Steer ${c.side} OUT by ${formatNumber(c.steerAngle)}° (use turn plates / a printable degree disc), hold the phone on the wheel face, and capture when the camber reading settles.`,
+      warning: state.settled ? 'Settled — capture the steered-OUT camber.' : settleBlockText(),
+      tone: state.settled ? 'good' : 'warn',
+    };
+  }
+  if (!c.captures.in) {
+    return {
+      title: '2. Capture camber steered IN',
+      description: `Steer ${c.side} IN by ${formatNumber(c.steerAngle)}° the other way, then capture the settled camber. The app subtracts the two reads, so any camber offset cancels.`,
+      warning: state.settled ? 'Settled — capture the steered-IN camber.' : settleBlockText(),
+      tone: state.settled ? 'good' : 'warn',
+    };
+  }
+  return {
+    title: '3. Save caster',
+    description: 'Both steer positions are captured. Review the caster value and its ± band, then save it to the front side.',
+    warning: 'SIGN CAVEAT: the magnitude is robust, but validate the absolute sign against a known-caster reference.',
+    tone: 'good',
+  };
+}
+
 function refreshGuide() {
   const guide = MODE_GUIDES[state.mode];
   const precision = precisionSummary(state.mode, state.selectedSide);
-  const { title, description, warning, tone } = computeGuideState({
-    sensorsAvailable: state.sensorsAvailable,
-    notice: activeNotice(),
-    workflow: state.workflow,
-    mode: state.mode,
-    selectedSide: state.selectedSide,
-    deviceProfileSet: !!state.deviceProfile,
-    fixtureSelected: !!activeFixture(),
-    // P1-3a: a zero captured in the wrong orientation family is treated as not set here too.
-    calibrationSet: modeIsZeroed(),
-    levelPrepared: !!(state.calibrationMeta.level || hasSavedLevelReading()),
-    // P0-4: physical-pose hint (non-blocking) instead of the old aspect-ratio orientation gate.
-    orientationOk: state.poseOk,
-    poseFamilyLabel: guide.orientation,
-    settled: state.settled,
-    baseline: precision.baseline,
-    precision,
-    modeLabel: MODE_LABELS[state.mode],
-    guide,
-    telemetryActive: state.sensorListenerAttached,
-  });
+  const { title, description, warning, tone } = state.mode === 'caster'
+    ? casterGuideState()
+    : computeGuideState({
+        sensorsAvailable: state.sensorsAvailable,
+        notice: activeNotice(),
+        workflow: state.workflow,
+        mode: state.mode,
+        selectedSide: state.selectedSide,
+        deviceProfileSet: !!state.deviceProfile,
+        fixtureSelected: !!activeFixture(),
+        // P1-3a: a zero captured in the wrong orientation family is treated as not set here too.
+        calibrationSet: modeIsZeroed(),
+        levelPrepared: !!(state.calibrationMeta.level || hasSavedLevelReading()),
+        // P0-4: physical-pose hint (non-blocking) instead of the old aspect-ratio orientation gate.
+        orientationOk: state.poseOk,
+        poseFamilyLabel: guide.orientation,
+        settled: state.settled,
+        baseline: precision.baseline,
+        precision,
+        modeLabel: MODE_LABELS[state.mode],
+        guide,
+        telemetryActive: state.sensorListenerAttached,
+      });
 
   el('workflow-step-title').textContent = title;
   el('workflow-step-desc').textContent = description;
@@ -2303,7 +2590,10 @@ function refreshGauge() {
   }
   // P1-4: surface the +/- band alongside the averaged value when it is estimable.
   const band = Number.isFinite(state.toleranceDeg) ? ` ${formatTolerance(state.toleranceDeg)}` : '';
-  el('avg-display').textContent = `Avg ${formatSigned(avg)}${band} from ${state.sampleBuffer.length} sample${state.sampleBuffer.length === 1 ? '' : 's'}`;
+  // CASTER: the live gauge IS camber at the current steer position (caster is the OUT−IN difference,
+  // computed in the caster pane). Make the avg line say so rather than implying the needle is caster.
+  const casterPrefix = state.mode === 'caster' ? 'Camber (steered) ' : 'Avg ';
+  el('avg-display').textContent = `${casterPrefix}${formatSigned(avg)}${band} from ${state.sampleBuffer.length} sample${state.sampleBuffer.length === 1 ? '' : 's'}`;
   // P0-5 / P1-6: the confidence label states the blocking condition rather than a bare %.
   const streamLost = state.sensorListenerAttached && state.rawSampleBuffer.length && !streamIsHealthy();
   el('confidence-label').textContent = !state.sensorListenerAttached
@@ -2323,6 +2613,73 @@ function syncToeField(id, value) {
   const node = el(id);
   if (node === document.activeElement) return;
   node.value = value === null || value === undefined ? '' : String(value);
+}
+
+// CASTER: render the two-capture caster pane. Visible only in caster mode (toggled here, not via
+// .pane-hidden, so caster stays a usable WORKFLOW). Each capture is a SETTLED camber read at a steer
+// position; the result composes the pure casterSwingResult. NO zeroing step — the offset cancels.
+function refreshCasterCard() {
+  const card = el('caster-card');
+  const isCaster = state.mode === 'caster';
+  card.classList.toggle('hidden-panel', !isCaster);
+  if (!isCaster) return;
+
+  const c = state.caster;
+  const result = casterResult();
+
+  // Setup controls (don't clobber the field the user is editing).
+  syncToeField('caster-steer-angle', c.steerAngle);
+  el('caster-side').value = c.side;
+
+  // Per-capture chips: show the captured camber + band, or a "capture when settled" prompt.
+  const captureChip = (position, label) => {
+    const cap = c.captures[position];
+    const valueEl = el(`caster-${position}-value`);
+    const subEl = el(`caster-${position}-sub`);
+    if (cap) {
+      valueEl.textContent = formatSigned(cap.camber);
+      subEl.textContent = `${label} • ${formatTolerance(cap.band)} • captured ${formatTime(cap.time)}`;
+    } else {
+      valueEl.textContent = '—';
+      subEl.textContent = state.sensorListenerAttached
+        ? (state.settled ? `${label} • settled — tap Capture ${position.toUpperCase()}` : `${label} • hold steady to capture`)
+        : `${label} • Start Measuring, then capture`;
+    }
+  };
+  captureChip('out', `Steered OUT ${formatNumber(c.steerAngle)}°`);
+  captureChip('in', `Steered IN ${formatNumber(c.steerAngle)}°`);
+
+  // Capture buttons: gated on a settled camber reading (a moving phone cannot capture).
+  const canCapture = state.sensorListenerAttached && state.settled && !state.readingMissing;
+  const outBtn = el('btn-caster-capture-out');
+  const inBtn = el('btn-caster-capture-in');
+  outBtn.disabled = !canCapture;
+  inBtn.disabled = !canCapture;
+  const captureTitle = !state.sensorListenerAttached
+    ? 'Tap Start Measuring before capturing.'
+    : (state.readingMissing
+        ? 'No camber reading — hold the phone flush to the wheel face.'
+        : (state.settled ? 'Capture the settled camber at this steer position.' : 'Hold steady until camber settles, then capture.'));
+  outBtn.title = captureTitle;
+  inBtn.title = captureTitle;
+
+  // Result chip + save gating (driven by the caster result, never the live settle gate).
+  el('caster-result-value').textContent = result.ready ? formatSigned(result.caster) : '—';
+  el('caster-result-sub').textContent = result.ready
+    ? `${formatTolerance(result.toleranceDeg)} (95%) • ${c.side} • from a ${formatNumber(c.captures.out.camber - c.captures.in.camber)}° camber swing`
+    : result.reason;
+
+  const verdictEl = el('caster-verdict');
+  verdictEl.textContent = result.ready
+    ? 'SIGN CAVEAT: the magnitude is robust, but validate the absolute sign against a known-caster reference. Realistic accuracy ~±0.5–1°.'
+    : result.reason;
+  verdictEl.className = `warning-text${result.ready ? ' good' : ''}`;
+
+  const saveBtn = el('btn-save-caster');
+  saveBtn.disabled = !result.ready;
+  saveBtn.title = result.ready
+    ? `Save caster to ${c.side} with its ± band (validate the sign vs a known reference).`
+    : result.reason;
 }
 
 // GEOMETRIC TOE: render the wizard. Visible only in toe mode (toggled here, not via .pane-hidden so
@@ -2691,6 +3048,16 @@ function refreshLockButton() {
   btn.className = `btn btn-small ${state.sensorListenerAttached ? 'btn-warning' : 'btn-surface'}`;
   btn.title = state.sensorListenerAttached ? 'Stop sensor telemetry' : 'Start sensor telemetry for a measurement';
   const saveBtn = el('btn-save');
+  // CASTER saves via its own pane (two captures, then compute). The bottom Save Avg button would
+  // otherwise wrongly save the live CAMBER read as a caster value, so disable it and point to the
+  // pane. saveMeasurement() also hard-guards caster, so this is belt-and-suspenders.
+  if (state.mode === 'caster') {
+    saveBtn.textContent = 'Save Caster';
+    saveBtn.disabled = true;
+    saveBtn.title = 'Use the caster pane above: capture steered OUT and IN, then Save caster.';
+    el('quick-control-hint').textContent = saveBtn.title;
+    return;
+  }
   saveBtn.textContent = state.workflow === 'precision' ? 'Save Precision' : 'Save Avg';
   if (state.workflow === 'precision') {
     const summary = precisionSummary(state.mode, state.selectedSide);
@@ -2741,6 +3108,12 @@ function savedNoteForReading(reading) {
   } else if (reading.workflow === 'precision') {
     parts.push(`precision ${reading.repeatabilityScore || 0}%`);
     parts.push(reading.trustVerdict || `${reading.samples} samples`);
+  } else if (reading.workflow === 'caster') {
+    // CASTER: surface the steer angle, the realistic-accuracy floor (so the ± band is not read as a
+    // tighter-than-real read-noise number), and the SIGN CAVEAT.
+    parts.push(`camber swing • ±${formatNumber(reading.casterSteerAngle || 0)}° steer`);
+    parts.push('realistic ±0.5–1°');
+    parts.push('validate sign vs known reference');
   } else {
     parts.push(`${reading.confidence}% confidence`);
     parts.push(`${reading.samples} samples`);
@@ -2759,6 +3132,9 @@ function specNoteForReading(reading) {
   }
   if (reading.workflow === 'precision') {
     return reading.trustVerdict || 'Precision saved';
+  }
+  if (reading.workflow === 'caster') {
+    return `Camber swing • ±${formatNumber(reading.casterSteerAngle || 0)}° • realistic ±0.5–1° • validate sign`;
   }
   return `${reading.confidence}% confidence`;
 }
@@ -2796,12 +3172,14 @@ function refreshWorkflowResults() {
   // as "Δ is 0 by assumption" instead of the misleading generic "FL − FR" — matching the
   // saved-readings card exactly. Other modes keep the literal subtraction note.
   const isToe = state.mode === 'toe';
+  const isCaster = state.mode === 'caster';
   const frontDeltaNote = frontDelta === null
     ? 'Needs FL + FR'
-    : (isToe ? toeDeltaNote('FL', 'FR', frontDelta, 'front') : 'FL − FR');
-  const rearDeltaNote = rearDelta === null
-    ? 'Needs RL + RR'
-    : (isToe ? toeDeltaNote('RL', 'RR', rearDelta, 'rear') : 'RL − RR');
+    : (isToe ? toeDeltaNote('FL', 'FR', frontDelta, 'front') : (isCaster ? casterDeltaNote(frontDelta) : 'FL − FR'));
+  // CASTER is front-only, so the rear pair never applies; say so instead of "Needs RL + RR".
+  const rearDeltaNote = isCaster
+    ? 'Caster is front-only — RL/RR N/A.'
+    : (rearDelta === null ? 'Needs RL + RR' : (isToe ? toeDeltaNote('RL', 'RR', rearDelta, 'rear') : 'RL − RR'));
   [
     ['Front Δ', frontDelta === null ? 'Pending' : formatSigned(frontDelta), frontDeltaNote],
     ['Rear Δ', rearDelta === null ? 'Pending' : formatSigned(rearDelta), rearDeltaNote],
@@ -2833,7 +3211,9 @@ function refreshSavedReadings() {
     ? savedNoteForReading(current)
     : (state.mode === 'toe'
         ? 'Enter the geometric toe wizard above, then tap Save toe reading.'
-        : `Hold the phone steady until it settles, then tap ${state.workflow === 'precision' ? 'Save Precision' : 'Save Avg'}.`);
+        : (state.mode === 'caster'
+            ? 'Capture camber steered OUT and steered IN in the caster pane above, then Save caster.'
+            : `Hold the phone steady until it settles, then tap ${state.workflow === 'precision' ? 'Save Precision' : 'Save Avg'}.`));
 
   const frontDelta = deltaFor(state.mode, 'FL', 'FR');
   const rearDelta = deltaFor(state.mode, 'RL', 'RR');
@@ -2845,6 +3225,11 @@ function refreshSavedReadings() {
     // via toeDeltaNote so both surfaces describe the same save identically.
     el('front-delta-note').textContent = toeDeltaNote('FL', 'FR', frontDelta, 'front');
     el('rear-delta-note').textContent = toeDeltaNote('RL', 'RR', rearDelta, 'rear');
+  } else if (state.mode === 'caster') {
+    // CASTER is a FRONT-wheel measurement, so the cross-caster delta is FL vs FR; the rear pair is
+    // N/A. Side-to-side caster should match within ~0.5° on a healthy car.
+    el('front-delta-note').textContent = casterDeltaNote(frontDelta);
+    el('rear-delta-note').textContent = 'Caster is a front-wheel measurement — RL/RR do not apply.';
   } else {
     // P2-3: warn when a delta is computed across mismatched calibration/orientation contexts.
     const frontContext = deltaContextFor(state.mode, 'FL', 'FR');
@@ -2899,6 +3284,16 @@ function refreshSavedReadings() {
       // P1-5: surface n alongside the verdict so trust is tied to capture count.
       if (item.trustVerdict) metaParts.push(`${item.trustVerdict} (n=${item.captureCount || item.samples || 0})`);
       if (item.reversalBias !== null && item.reversalBias !== undefined) metaParts.push(`bias ${formatSigned(item.reversalBias)}`);
+    } else if (item.workflow === 'caster') {
+      // CASTER: surface the steer angle, the OUT/IN camber reads, the realistic-accuracy floor (the
+      // ± band is floored at the documented honest accuracy, not the bare read-noise term), and the
+      // SIGN CAVEAT.
+      metaParts.push(`camber swing • ±${formatNumber(item.casterSteerAngle || 0)}° steer`);
+      if (Number.isFinite(item.casterCamberOut) && Number.isFinite(item.casterCamberIn)) {
+        metaParts.push(`out ${formatSigned(item.casterCamberOut)} / in ${formatSigned(item.casterCamberIn)}`);
+      }
+      metaParts.push('realistic ±0.5–1°');
+      metaParts.push('validate sign vs known reference');
     } else {
       metaParts.push(`${item.confidence}% confidence`);
       metaParts.push(`${item.samples} samples`);
@@ -2959,6 +3354,7 @@ function refreshUI() {
   refreshReadiness();
   refreshGauge();
   refreshToeWizard();
+  refreshCasterCard();
   refreshStatus();
   refreshCalibrationCard();
   refreshPrecisionCard();
@@ -2976,6 +3372,8 @@ function refreshLiveUI() {
   refreshGuide();
   refreshReadiness();
   refreshGauge();
+  // CASTER capture buttons enable/disable as the camber reading settles, so refresh the pane live.
+  refreshCasterCard();
   refreshStatus();
   refreshLockButton();
   refreshAdvanced();
@@ -3036,6 +3434,11 @@ function setupEventHandlers() {
       // PRECISION string-box actions.
       saveToeStringBox: () => saveToeStringBox(),
       resetToeStringBox: () => resetToeStringBox(),
+      // CASTER capture-flow actions (two settled camber captures, then compute + save).
+      captureCasterOut: () => captureCaster('out'),
+      captureCasterIn: () => captureCaster('in'),
+      saveCaster: () => saveCasterMeasurement(),
+      resetCaster: () => resetCaster(),
     };
     const handler = handlers[action];
     if (handler) handler();
@@ -3057,7 +3460,13 @@ function setupEventHandlers() {
     }
     // PRECISION string-box per-corner gaps share the same delegated input/change path.
     const stringTrigger = event.target.closest('[data-action="toeStringInput"]');
-    if (stringTrigger) setToeStringInput(stringTrigger.dataset.arg, event.target.value);
+    if (stringTrigger) {
+      setToeStringInput(stringTrigger.dataset.arg, event.target.value);
+      return;
+    }
+    // CASTER steer-angle input + side <select> share the same delegated input/change path.
+    const casterTrigger = event.target.closest('[data-action="casterInput"]');
+    if (casterTrigger) setCasterInput(casterTrigger.dataset.arg, event.target.value);
   };
   document.addEventListener('input', handleToeInput);
   document.addEventListener('change', handleToeInput);
