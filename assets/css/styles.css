@@ -850,6 +850,167 @@
       line-height: 1.5;
     }
 
+    /* GEOMETRIC TOE wizard: the workflow for toe mode. Stretches its content like the other
+       guided cards and reuses status-chip / btn / panel-section styling for consistency. */
+    .toe-wizard {
+      align-items: stretch;
+      gap: 12px;
+    }
+    .form-input {
+      width: 100%;
+      min-height: 40px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--card);
+      color: var(--text);
+      padding: 10px 12px;
+      font-size: 13px;
+      font-variant-numeric: tabular-nums;
+    }
+    .form-input:focus,
+    .form-select:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px var(--accent);
+    }
+    .toe-field-grid {
+      width: 100%;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .toe-field {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      min-width: 0;
+    }
+    .toe-field > span {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+    }
+    .toe-field small {
+      font-size: 10px;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+    .toe-method-tabs {
+      width: 100%;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .toe-method-tab {
+      width: 100%;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--muted);
+      border-radius: 10px;
+      padding: 10px 6px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.4px;
+      cursor: pointer;
+    }
+    .toe-method-tab.active {
+      background: rgba(88, 166, 255, 0.16);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    .toe-reads {
+      width: 100%;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .toe-read-pair {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+    }
+    .toe-read-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+    }
+    .toe-pair-inputs {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .toe-result {
+      width: 100%;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .toe-save-row {
+      width: 100%;
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) auto auto;
+      gap: 10px;
+      align-items: end;
+    }
+    .toe-save-side { min-width: 0; }
+    /* PRECISION string-box per-wheel + thrust section (precision toe path). */
+    .toe-stringbox summary {
+      color: var(--accent);
+    }
+    .toe-checklist {
+      margin: 0;
+      padding-left: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 12px;
+      line-height: 1.4;
+      color: var(--text);
+    }
+    .toe-stringbox-grid {
+      width: 100%;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .toe-corner {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+    }
+    .toe-corner-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+    }
+    .toe-corner-result {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--accent);
+      font-variant-numeric: tabular-nums;
+    }
+    @media (max-width: 380px) {
+      .toe-field-grid,
+      .toe-reads,
+      .toe-result,
+      .toe-stringbox-grid { grid-template-columns: 1fr; }
+      .toe-save-row { grid-template-columns: 1fr; }
+    }
+
     .instr-header { padding-bottom: 20px; }
     .step-list,
     .mode-card-list {

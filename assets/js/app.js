@@ -6,6 +6,8 @@ import {
   captureSeriesStats,
   clampAngle as clampAngleInRange,
   computeSampleQuality,
+  computeToeWizardResult,
+  computeToeStringBoxResult,
   deltaContextMatch,
   flipSelfTest,
   gravityFromEuler,
@@ -46,9 +48,10 @@ const STDDEV_PENALTY = 420;
 const ALIGNED_HOLD_MS = 500;
 const MODE_LABELS = {
   camber: 'Camber Angle',
-  // P0-2: a gravity sensor is blind to rotation about vertical AND has no vehicle-centerline
-  // reference, so toe is NOT a measured inclination here. Label it experimental everywhere.
-  toe: 'Toe (experimental)',
+  // A gravity sensor is blind to rotation about vertical AND has no vehicle-centerline reference, so
+  // toe is NOT a measured inclination. It is a real GUIDED GEOMETRIC calculator now (plates/tape
+  // TOTAL toe + precision string-box per-wheel/thrust), so label it "geometric", not "experimental".
+  toe: 'Toe (geometric)',
   level: 'Level (Left / Right)',
   pitch: 'Pitch Angle (Front / Back)',
 };
@@ -60,11 +63,11 @@ const MODE_GUIDES = {
     calibration: 'Zero against a known vertical or repeatable reference before reading camber.',
   },
   toe: {
-    // P0-2: toe is geometric, not an inclinometer reading. The "placement" line points the user
-    // at the real method instead of implying the phone can measure toe directly.
-    placement: 'Toe is geometric: measure rim offset front vs rear, not phone tilt',
+    // Toe is geometric, not an inclinometer reading. The guided toe wizard above IS the workflow;
+    // these lines point the user at the measured-gap method instead of implying the phone tilts.
+    placement: 'Toe is geometric: use the wizard above — enter measured rim/plate gaps, not phone tilt',
     orientation: 'Portrait',
-    calibration: 'The phone cannot measure toe — use string lines, turn plates, or atan(offset / rim length).',
+    calibration: 'The phone cannot sense toe — the wizard computes atan(front-vs-rear offset / measured D). Roll & re-measure to cancel runout.',
   },
   level: {
     placement: 'Placement: On a flat sill, roof, or hub surface',
@@ -124,6 +127,13 @@ const BASELINE_CAPTURE_TARGET = 2;
 // P2-3: how many PRIOR saved values to keep per mode+side so a save no longer blindly discards
 // the previous reading (a small history, not the full log).
 const MEASUREMENT_HISTORY_DEPTH = 4;
+// GEOMETRIC TOE wizard: toe is NOT a sensor reading (a gravity inclinometer is blind to rotation
+// about vertical). The wizard is a pure geometric calculator. Default read uncertainty is 0.8 mm
+// (1/32 in), supplied in the SAME units the user is working in. The runout/seating disagreement
+// threshold is the headline caveat — it is the dominant toe error, so the two forced read-pairs
+// must agree within this many degrees before a save is trusted.
+const TOE_DEFAULT_READ_UNCERTAINTY = { mm: 0.8, in: 0.8 / 25.4 };
+const TOE_RUNOUT_THRESHOLD_DEG = 0.25;
 
 const state = {
   mode: 'level',
@@ -192,7 +202,79 @@ const state = {
   // P0-7: guided 180° flip trueness self-test. firstReading holds reading A until the flip;
   // result holds the last {mode, residualBias, asymmetry, corrected, passed, tolerance, time}.
   selfTest: { mode: null, firstReading: null, result: null },
+  // GEOMETRIC TOE wizard: pure, sensor-free calculator state. setup holds the mandatory reference
+  // diameter/units/spec/read-uncertainty; reads holds the two forced read-pairs (roll-and-average);
+  // method picks plates vs tape; saveSide maps the result onto the FL/FR/RL/RR measurements model.
+  toeWizard: defaultToeWizard(),
 };
+
+function defaultToeWizard() {
+  return {
+    method: 'plates',
+    units: 'mm',
+    specType: 'total',
+    diameter: null,
+    specDiameter: null,
+    readUncertainty: TOE_DEFAULT_READ_UNCERTAINTY.mm,
+    reads: [
+      { front: null, rear: null },
+      { front: null, rear: null },
+    ],
+    // PRECISION string-box: transient per-corner string-to-rim gaps (front/rear) for the four
+    // wheels. Like the gap reads, these are never persisted — only the wizard SETUP survives reload.
+    stringBox: defaultToeStringBox(),
+    saveSide: 'front',
+  };
+}
+
+// PRECISION string-box: empty per-corner front/rear string offsets for FL/FR/RL/RR.
+function defaultToeStringBox() {
+  return SIDES.reduce((acc, side) => {
+    acc[side] = { front: null, rear: null };
+    return acc;
+  }, {});
+}
+
+// GEOMETRIC TOE: tolerant migration of a persisted wizard setup. Unknown/old data falls back to the
+// defaults; the transient gap reads are never persisted, so they always start empty.
+function restoreToeWizardSetup(stored) {
+  const wizard = defaultToeWizard();
+  if (!stored || typeof stored !== 'object') return wizard;
+  wizard.method = stored.method === 'tape' ? 'tape' : 'plates';
+  wizard.units = stored.units === 'in' ? 'in' : 'mm';
+  wizard.specType = stored.specType === 'perWheel' ? 'perWheel' : 'total';
+  wizard.diameter = Number.isFinite(stored.diameter) && stored.diameter > 0 ? stored.diameter : null;
+  wizard.specDiameter = Number.isFinite(stored.specDiameter) && stored.specDiameter > 0 ? stored.specDiameter : null;
+  wizard.readUncertainty = Number.isFinite(stored.readUncertainty) && stored.readUncertainty >= 0
+    ? stored.readUncertainty
+    : TOE_DEFAULT_READ_UNCERTAINTY[wizard.units];
+  wizard.saveSide = ['front', 'rear', ...SIDES].includes(stored.saveSide) ? stored.saveSide : 'front';
+  return wizard;
+}
+
+// GEOMETRIC TOE: the pure orchestrator result for the current wizard inputs (sensor-free).
+function toeWizardResult() {
+  const w = state.toeWizard;
+  return computeToeWizardResult({
+    method: w.method,
+    diameter: w.diameter,
+    specType: w.specType,
+    specDiameter: w.specDiameter,
+    readUncertainty: w.readUncertainty,
+    runoutThreshold: TOE_RUNOUT_THRESHOLD_DEG,
+  }, w.reads);
+}
+
+// GEOMETRIC TOE — PRECISION string-box: the pure per-wheel/thrust result for the current corner
+// inputs (sensor-free). Reuses the wizard's reference diameter, spec diameter, and read uncertainty.
+function toeStringBoxResult() {
+  const w = state.toeWizard;
+  return computeToeStringBoxResult({
+    diameter: w.diameter,
+    specDiameter: w.specDiameter,
+    readUncertainty: w.readUncertainty,
+  }, w.stringBox);
+}
 
 function defaultOffsets() {
   return { camber: 0, toe: 0, level: 0, pitch: 0 };
@@ -814,6 +896,8 @@ function loadState() {
       .filter(item => MODES.includes(item.mode) && SIDES.includes(item.side) && Number.isFinite(item.value))
       // P2-5: pure, tested normalization incl. P2-3 context stamps and bounded save history.
       .map(item => normalizeMeasurement(item, new Date().toISOString(), MEASUREMENT_HISTORY_DEPTH));
+    // GEOMETRIC TOE: restore the wizard SETUP tolerantly (older data simply has none -> defaults).
+    state.toeWizard = restoreToeWizardSetup(parsed?.toeWizardSetup);
   } catch (error) {
     state.calibrationOffsets = defaultOffsets();
     state.calibrationMeta = defaultCalibrationMeta();
@@ -822,6 +906,7 @@ function loadState() {
     state.fixtureProfiles = [];
     state.precisionSession = defaultPrecisionSession();
     state.measurements = [];
+    state.toeWizard = defaultToeWizard();
     console.warn('Unable to restore saved Evanline state.', error);
     state.notice = {
       text: 'Saved calibration could not be restored. Local storage may be unavailable.',
@@ -841,6 +926,17 @@ function saveState() {
       fixtureProfiles: state.fixtureProfiles,
       precisionSession: state.precisionSession,
       measurements: state.measurements.slice(-MAX_STORED_MEASUREMENTS),
+      // GEOMETRIC TOE: persist only the wizard SETUP (diameter/units/spec/uncertainty/method/side),
+      // not the transient gap reads, so a returning user keeps their reference context.
+      toeWizardSetup: {
+        method: state.toeWizard.method,
+        units: state.toeWizard.units,
+        specType: state.toeWizard.specType,
+        diameter: state.toeWizard.diameter,
+        specDiameter: state.toeWizard.specDiameter,
+        readUncertainty: state.toeWizard.readUncertainty,
+        saveSide: state.toeWizard.saveSide,
+      },
     }));
   } catch (error) {
     console.warn('Unable to persist Evanline state.', error);
@@ -1708,6 +1804,246 @@ function resetFlipSelfTest() {
   refreshUI();
 }
 
+// GEOMETRIC TOE: parse a string field into a finite number or null (blank/invalid => null so the
+// pure orchestrator treats it as "not entered" rather than 0).
+function parseToeNumber(raw) {
+  if (typeof raw !== 'string') return Number.isFinite(raw) ? raw : null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const value = Number(trimmed);
+  return Number.isFinite(value) ? value : null;
+}
+
+// GEOMETRIC TOE: a single input/select change in the wizard. `field` names the setup key or a
+// read-pair gap (front1/rear1/front2/rear2). Changing units re-defaults the read uncertainty only
+// when the user has not overridden it from the previous unit default.
+function setToeInput(field, value) {
+  const w = state.toeWizard;
+  switch (field) {
+    case 'units': {
+      const nextUnits = value === 'in' ? 'in' : 'mm';
+      const wasDefault = !Number.isFinite(w.readUncertainty)
+        || Math.abs(w.readUncertainty - TOE_DEFAULT_READ_UNCERTAINTY[w.units]) < 1e-9;
+      w.units = nextUnits;
+      if (wasDefault) w.readUncertainty = TOE_DEFAULT_READ_UNCERTAINTY[nextUnits];
+      break;
+    }
+    case 'specType':
+      w.specType = value === 'perWheel' ? 'perWheel' : 'total';
+      break;
+    case 'saveSide':
+      w.saveSide = ['front', 'rear', ...SIDES].includes(value) ? value : 'front';
+      break;
+    case 'diameter':
+      w.diameter = parseToeNumber(value);
+      break;
+    case 'specDiameter':
+      w.specDiameter = parseToeNumber(value);
+      break;
+    case 'readUncertainty':
+      w.readUncertainty = parseToeNumber(value);
+      break;
+    case 'front1': w.reads[0].front = parseToeNumber(value); break;
+    case 'rear1': w.reads[0].rear = parseToeNumber(value); break;
+    case 'front2': w.reads[1].front = parseToeNumber(value); break;
+    case 'rear2': w.reads[1].rear = parseToeNumber(value); break;
+    default: return;
+  }
+  saveState();
+  refreshToeWizard();
+}
+
+// GEOMETRIC TOE: plates vs tape method toggle. Both yield TOTAL axle toe via the same atan; the
+// label/hint copy differs so the procedure coaching matches the chosen method.
+function setToeMethod(method) {
+  state.toeWizard.method = method === 'tape' ? 'tape' : 'plates';
+  saveState();
+  refreshToeWizard();
+}
+
+// GEOMETRIC TOE: clear the transient gap reads (keeps the persisted setup so the reference context
+// survives a reset).
+function resetToeWizard() {
+  state.toeWizard.reads = [
+    { front: null, rear: null },
+    { front: null, rear: null },
+  ];
+  saveState();
+  setNotice('Toe read-pairs cleared. Setup kept.', 'warn');
+  refreshToeWizard();
+}
+
+// PRECISION string-box: a single per-corner string-offset edit. `field` is "SIDE.front" or
+// "SIDE.rear" (e.g. "FL.front"). Reads are transient, so this does NOT persist — only re-renders.
+function setToeStringInput(field, value) {
+  const [side, edge] = String(field).split('.');
+  if (!SIDES.includes(side) || (edge !== 'front' && edge !== 'rear')) return;
+  state.toeWizard.stringBox[side][edge] = parseToeNumber(value);
+  refreshToeWizard();
+}
+
+// PRECISION string-box: clear the four-corner string offsets (keeps the persisted setup).
+function resetToeStringBox() {
+  state.toeWizard.stringBox = defaultToeStringBox();
+  setNotice('String-box corners cleared. Setup kept.', 'warn');
+  refreshToeWizard();
+}
+
+// PRECISION string-box: commit the four per-wheel toe values to FL/FR/RL/RR. Unlike the plates path
+// this needs NO symmetry assumption — each corner carries its own measured per-wheel toe, the +/-
+// band, and the thrust/linear context stamps. The wizard is the save driver (no sensor settle gate).
+function saveToeStringBox() {
+  const result = toeStringBoxResult();
+  if (!result.ready) {
+    setNotice(result.reason || 'Enter all four corners before saving string-box toe.', 'warn');
+    refreshToeWizard();
+    return;
+  }
+  const w = state.toeWizard;
+  const time = new Date().toISOString();
+  const thrustNote = `thrust ${formatSigned(result.thrust)}`;
+  const trustVerdict = `Geometric string-box • per-wheel split • ${thrustNote}`;
+
+  SIDES.forEach(side => {
+    const perWheel = result.perWheel[side];
+    const linear = result.perWheelLinear[side];
+    const measurement = {
+      id: `toe-${side}`,
+      mode: 'toe',
+      side,
+      value: Number(perWheel.toFixed(2)),
+      // Geometric toe has no sensor confidence; trust comes from the band + box squaring.
+      confidence: 100,
+      toleranceDeg: Number.isFinite(result.toleranceDeg) ? Number(result.toleranceDeg.toFixed(3)) : null,
+      samples: 1,
+      time,
+      workflow: 'geometric',
+      rawValue: null,
+      correctedValue: null,
+      reversalBias: null,
+      repeatabilityScore: null,
+      captureCount: 1,
+      baselineQuality: null,
+      trustVerdict,
+      // Geometric context stamps. The string-box splits L vs R, so symmetry is NOT assumed.
+      toeMethod: 'string-box',
+      toeUnits: w.units,
+      toeDiameter: w.diameter,
+      toeSpecDiameter: w.specDiameter,
+      toeTotal: side.startsWith('F')
+        ? Number(result.totalFront.toFixed(3))
+        : Number(result.totalRear.toFixed(3)),
+      toePerWheel: Number(perWheel.toFixed(3)),
+      toeLinear: Number.isFinite(linear) ? Number(linear.toFixed(3)) : null,
+      toeSymmetryAssumed: false,
+      toeThrust: Number(result.thrust.toFixed(3)),
+      toeRunoutDisagreement: null,
+      toeRunoutFault: false,
+      offsetUsed: 0,
+      gainUsed: 1,
+      orientation: state.screenOrientation,
+      pose: currentPoseOrientation(),
+      deviceRefTime: null,
+      fixtureId: '',
+    };
+    commitMeasurement(measurement);
+  });
+
+  saveState();
+  setSaveConfirmation(`Saved string-box per-wheel toe to FL+FR+RL+RR ${formatTolerance(result.toleranceDeg)} • thrust ${formatSigned(result.thrust)}.`);
+  setNotice(`Saved geometric string-box toe (per-wheel split, thrust ${formatSigned(result.thrust)}) to all four corners.`, 'good');
+  refreshUI();
+}
+
+// GEOMETRIC TOE: which FL/FR/RL/RR sides a save targets. "front"/"rear" map a TOTAL/per-wheel toe to
+// the corner pair (total saved to both under the symmetry flag); a single side saves to that corner.
+function toeSaveSides(saveSide) {
+  if (saveSide === 'front') return ['FL', 'FR'];
+  if (saveSide === 'rear') return ['RL', 'RR'];
+  return SIDES.includes(saveSide) ? [saveSide] : ['FL', 'FR'];
+}
+
+// GEOMETRIC TOE: commit the computed toe into the FL/FR/RL/RR measurements model. The wizard is the
+// save driver here (NOT the sensor settle gate) — toe has no settled sensor reading. Per-wheel toe
+// is saved when the user picked a single corner or a per-wheel spec; the total goes to a pair under
+// the symmetry assumption. Each save carries the +/- band and the geometric context stamps so it
+// shows in the Workflow results grid and Saved readings card like any other reading.
+function saveToeMeasurement() {
+  const w = state.toeWizard;
+  const result = toeWizardResult();
+  if (!result.ready) {
+    setNotice(result.reason || 'Enter setup and both read-pairs before saving toe.', 'warn');
+    refreshToeWizard();
+    return;
+  }
+
+  const sides = toeSaveSides(w.saveSide);
+  const singleSide = sides.length === 1;
+  // A pair save stores the TOTAL toe to both corners under the symmetry flag; a single-corner save
+  // stores the per-wheel value (total / 2) for that corner.
+  const value = singleSide ? result.perWheelToe : result.totalToe;
+  const symmetryAssumed = !singleSide;
+  const time = new Date().toISOString();
+  const runoutNote = result.runout.exceeds
+    ? `runout fault Δ${formatNumber(result.runout.disagreement)}°`
+    : 'runout ok';
+  const trustVerdict = `Geometric ${w.method}${symmetryAssumed ? ' • total/2 symmetry assumed' : ''} • ${runoutNote}`;
+
+  sides.forEach(side => {
+    const measurement = {
+      id: `toe-${side}`,
+      mode: 'toe',
+      side,
+      value: Number(value.toFixed(2)),
+      // Geometric toe has no sensor confidence; trust comes from the band + runout check.
+      confidence: result.runout.exceeds ? 0 : 100,
+      // The +/- 95% band from u/D (x sqrt(2)) travels with the saved reading.
+      toleranceDeg: Number.isFinite(result.toleranceDeg) ? Number(result.toleranceDeg.toFixed(3)) : null,
+      samples: 2,
+      time,
+      // Distinguish geometric toe saves from sensor-based quick/precision saves.
+      workflow: 'geometric',
+      rawValue: null,
+      correctedValue: null,
+      reversalBias: null,
+      repeatabilityScore: null,
+      captureCount: 2,
+      baselineQuality: null,
+      trustVerdict,
+      // Geometric context stamps (parallel to currentCalibrationContext): the measured reference,
+      // method, units, and the runout disagreement so a later comparison is honest about the basis.
+      toeMethod: w.method,
+      toeUnits: w.units,
+      toeDiameter: w.diameter,
+      toeSpecDiameter: w.specDiameter,
+      toeTotal: Number(result.totalToe.toFixed(3)),
+      toePerWheel: Number(result.perWheelToe.toFixed(3)),
+      toeLinear: singleSide
+        ? (Number.isFinite(result.perWheelLinear) ? Number(result.perWheelLinear.toFixed(3)) : null)
+        : (Number.isFinite(result.totalLinear) ? Number(result.totalLinear.toFixed(3)) : null),
+      toeSymmetryAssumed: symmetryAssumed,
+      toeRunoutDisagreement: result.runout.ready ? Number(result.runout.disagreement.toFixed(3)) : null,
+      toeRunoutFault: result.runout.exceeds,
+      // P2-3-style context so a cross-corner delta is not silently compared across mismatched bases.
+      offsetUsed: 0,
+      gainUsed: 1,
+      orientation: state.screenOrientation,
+      pose: currentPoseOrientation(),
+      deviceRefTime: null,
+      fixtureId: '',
+    };
+    commitMeasurement(measurement);
+  });
+
+  saveState();
+  const sideLabel = sides.join(' + ');
+  setSaveConfirmation(`Saved geometric toe ${formatSigned(Number(value.toFixed(2)))} ${formatTolerance(result.toleranceDeg)} to ${sideLabel}.`);
+  setNotice(result.runout.exceeds
+    ? `Saved toe to ${sideLabel}, but the runout check FAILED (Δ${formatNumber(result.runout.disagreement)}°). Re-seat the rim and re-measure.`
+    : `Saved geometric toe for ${sideLabel}.`, result.runout.exceeds ? 'warn' : 'good');
+  refreshUI();
+}
+
 function measurementFor(mode, side) {
   return state.measurements.find(item => item.mode === mode && item.side === side) || null;
 }
@@ -1766,6 +2102,32 @@ function deltaContextFor(mode, leftSide, rightSide) {
   const right = measurementFor(mode, rightSide);
   if (!left || !right) return { ok: true, reasons: [] };
   return deltaContextMatch(left, right);
+}
+
+// GEOMETRIC TOE: are both saved toe readings on a pair the SAME total-toe value stamped under the
+// symmetry assumption (so their left-right delta is 0 by construction, not a measured difference)?
+function symmetricToePair(leftSide, rightSide) {
+  const left = measurementFor('toe', leftSide);
+  const right = measurementFor('toe', rightSide);
+  return !!left && !!right && left.toeSymmetryAssumed === true && right.toeSymmetryAssumed === true;
+}
+
+// GEOMETRIC TOE: the honest note for a toe L-R delta, shared by the saved-readings card AND the
+// workflow-results grid so both surfaces describe the SAME data identically. A front/rear pair
+// saved from a single TOTAL plate read holds the same value on both corners (the L-R split is a
+// symmetry assumption), so the delta is 0 by construction — flag that rather than implying a
+// measured per-wheel difference. A real per-wheel save (string-box) gives a genuine left-right
+// delta referenced to the thrust line. `axle` selects the rear-specific thrust-angle wording.
+function toeDeltaNote(leftSide, rightSide, delta, axle = 'front') {
+  if (delta === null) {
+    return `Use the geometric toe wizard to save ${leftSide} and ${rightSide}.`;
+  }
+  if (symmetricToePair(leftSide, rightSide)) {
+    return `Δ is 0 by assumption — a TOTAL plate read cannot split ${leftSide} vs ${rightSide}.`;
+  }
+  return axle === 'rear'
+    ? 'Per-wheel rear toe delta drives the thrust angle ((RL − RR) / 2).'
+    : 'Per-wheel toe delta. Reference to the thrust line, not the centerline, for adjustment.';
 }
 
 function buildElement(tagName, className, text) {
@@ -1953,6 +2315,152 @@ function refreshGauge() {
             : (state.settled
                 ? `Confidence ${state.confidence}% ${formatTolerance(state.toleranceDeg)} • Settled`
                 : `Confidence ${state.confidence}% • Live`)));
+}
+
+// GEOMETRIC TOE: sync a control's displayed value from state WITHOUT clobbering the field the user
+// is actively editing (avoids cursor jumps on every keystroke). null/undefined renders as blank.
+function syncToeField(id, value) {
+  const node = el(id);
+  if (node === document.activeElement) return;
+  node.value = value === null || value === undefined ? '' : String(value);
+}
+
+// GEOMETRIC TOE: render the wizard. Visible only in toe mode (toggled here, not via .pane-hidden so
+// the workflow stays the WORKFLOW for toe). The result comes from the pure orchestrator; the sensor
+// settle/save gates never apply to toe.
+function refreshToeWizard() {
+  const wizard = el('toe-wizard');
+  const isToe = state.mode === 'toe';
+  wizard.classList.toggle('hidden-panel', !isToe);
+  // Skip the (hidden) DOM work entirely when not in toe mode.
+  if (!isToe) return;
+
+  const w = state.toeWizard;
+  const unitLabel = w.units === 'in' ? 'in' : 'mm';
+
+  // Setup + read inputs.
+  syncToeField('toe-diameter', w.diameter);
+  syncToeField('toe-spec-diameter', w.specDiameter);
+  syncToeField('toe-read-uncertainty', w.readUncertainty);
+  el('toe-units').value = w.units;
+  el('toe-spec-type').value = w.specType;
+  el('toe-save-side').value = w.saveSide;
+  syncToeField('toe-front-1', w.reads[0].front);
+  syncToeField('toe-rear-1', w.reads[0].rear);
+  syncToeField('toe-front-2', w.reads[1].front);
+  syncToeField('toe-rear-2', w.reads[1].rear);
+
+  // Method tabs + coaching copy.
+  el('toe-method-plates').classList.toggle('active', w.method === 'plates');
+  el('toe-method-plates').setAttribute('aria-selected', String(w.method === 'plates'));
+  el('toe-method-tape').classList.toggle('active', w.method === 'tape');
+  el('toe-method-tape').setAttribute('aria-selected', String(w.method === 'tape'));
+  el('toe-method-hint').textContent = w.method === 'plates'
+    ? `Plates + 2 tapes give TOTAL axle toe directly: measure the gap between the plates at the FRONT (F) and REAR (R) of the front tires over span D (${unitLabel}).`
+    : `Tape-only fallback: mark two points on the front rim at equal height, measure the left–right gap at the REAR of both front wheels (R), roll forward so the SAME marks reach the FRONT, then re-measure (F). Span D is the mark height (${unitLabel}). Rolling the identical points cancels runout. ~0.15–0.3° total only.`;
+
+  const result = toeWizardResult();
+  const computed = result.ready;
+
+  // Result chips.
+  el('toe-total-value').textContent = computed ? formatSigned(result.totalToe) : '—';
+  el('toe-total-sub').textContent = computed
+    ? `${formatTolerance(result.toleranceDeg)} (95%) • toe-in positive • averaged over 2 read-pairs`
+    : 'Enter both read-pairs to compute.';
+  el('toe-perwheel-value').textContent = computed ? formatSigned(result.perWheelToe) : '—';
+  el('toe-perwheel-sub').textContent = 'Assumes left–right symmetry — plates cannot split L vs R.';
+
+  const linearForDisplay = w.specType === 'perWheel' ? result.perWheelLinear : result.totalLinear;
+  el('toe-linear-value').textContent = computed && Number.isFinite(linearForDisplay)
+    ? `${linearForDisplay >= 0 ? '+' : ''}${linearForDisplay.toFixed(3)} ${unitLabel}`
+    : '—';
+  el('toe-linear-sub').textContent = Number.isFinite(w.specDiameter) && w.specDiameter > 0
+    ? `${w.specType === 'perWheel' ? 'Per-wheel' : 'Total'} linear at ${w.specDiameter} ${unitLabel} spec diameter.`
+    : 'Enter the spec diameter to show the linear equivalent.';
+
+  el('toe-runout-value').textContent = result.runout.ready
+    ? `${formatNumber(result.runout.disagreement)}°`
+    : '—';
+  el('toe-runout-sub').textContent = !result.runout.ready
+    ? 'Needs both read-pairs.'
+    : (result.runout.exceeds
+        ? `Exceeds ±${TOE_RUNOUT_THRESHOLD_DEG}° — runout/seating fault. Re-seat the rim and re-measure.`
+        : `Within ±${TOE_RUNOUT_THRESHOLD_DEG}° — read-pairs agree.`);
+
+  // Verdict + save gating. The save is driven by the wizard result, never state.settled.
+  const verdictEl = el('toe-verdict');
+  verdictEl.textContent = result.reason;
+  verdictEl.className = `warning-text${computed ? (result.runout.exceeds ? ' warn' : ' good') : ''}`;
+
+  const saveBtn = el('btn-save-toe');
+  saveBtn.disabled = !computed;
+  saveBtn.title = computed
+    ? (result.runout.exceeds ? 'Runout check failed — re-seat and re-measure before saving.' : 'Save the computed toe to the selected side(s).')
+    : result.reason;
+
+  refreshToeStringBox(unitLabel);
+}
+
+// PRECISION string-box: render the per-wheel/thrust panel. Visible only in the PRECISION workflow
+// (it is the precision toe path); the quick plates/tape result above always shows in toe mode. The
+// result comes from the pure orchestrator — no sensors, no settle gate.
+function refreshToeStringBox(unitLabel) {
+  const section = el('toe-stringbox');
+  const showStringBox = state.workflow === 'precision';
+  section.classList.toggle('hidden-panel', !showStringBox);
+  if (!showStringBox) return;
+
+  const w = state.toeWizard;
+  const result = toeStringBoxResult();
+
+  // Per-corner inputs + computed per-wheel angle.
+  SIDES.forEach(side => {
+    syncToeField(`toe-sb-${side}-front`, w.stringBox[side].front);
+    syncToeField(`toe-sb-${side}-rear`, w.stringBox[side].rear);
+    const perWheel = result.perWheel[side];
+    const linear = result.perWheelLinear[side];
+    const resultEl = el(`toe-sb-${side}-result`);
+    if (Number.isFinite(perWheel)) {
+      const linearText = Number.isFinite(linear)
+        ? ` (${linear >= 0 ? '+' : ''}${linear.toFixed(3)} ${unitLabel})`
+        : '';
+      resultEl.textContent = `Per-wheel ${formatSigned(perWheel)} ${formatTolerance(result.toleranceDeg)}${linearText}`;
+    } else {
+      resultEl.textContent = 'Enter front + rear string gaps';
+    }
+  });
+
+  const ready = result.ready;
+  const linearAt = Number.isFinite(w.specDiameter) && w.specDiameter > 0
+    ? ` at ${w.specDiameter} ${unitLabel} spec`
+    : '';
+
+  el('toe-sb-total-front').textContent = ready ? formatSigned(result.totalFront) : '—';
+  el('toe-sb-total-front-sub').textContent = ready
+    ? `FL + FR per-wheel${linearAt ? ` • linear shown per corner${linearAt}` : ''}.`
+    : 'FL + FR per-wheel.';
+  el('toe-sb-total-rear').textContent = ready ? formatSigned(result.totalRear) : '—';
+  el('toe-sb-total-rear-sub').textContent = 'RL + RR per-wheel.';
+  el('toe-sb-thrust').textContent = ready ? formatSigned(result.thrust) : '—';
+  el('toe-sb-thrust-sub').textContent = ready
+    ? `(RL − RR) / 2 • ${result.thrust > 0 ? 'thrust line points LEFT' : result.thrust < 0 ? 'thrust line points RIGHT' : 'centered'}.`
+    : '(RL − RR) / 2 • + points left.';
+  el('toe-sb-front-ref').textContent = ready
+    ? `${formatSigned(result.frontThrustReferenced.FL)} / ${formatSigned(result.frontThrustReferenced.FR)}`
+    : '—';
+  el('toe-sb-front-ref-sub').textContent = ready
+    ? 'FL / FR corrected to the thrust line — adjust front toe to this, not the centerline.'
+    : 'FL/FR corrected to the thrust line.';
+
+  const verdict = el('toe-stringbox-verdict');
+  verdict.textContent = result.reason;
+  verdict.className = `warning-text${ready ? ' good' : ''}`;
+
+  const saveBtn = el('btn-save-toe-stringbox');
+  saveBtn.disabled = !ready;
+  saveBtn.title = ready
+    ? 'Save the four per-wheel toe values (no symmetry assumption) to FL/FR/RL/RR.'
+    : result.reason;
 }
 
 function refreshCalibrationCard() {
@@ -2201,6 +2709,60 @@ function refreshSaveConfirmation() {
   confirmation.classList.toggle('hidden-panel', !state.lastSaveConfirmation);
 }
 
+// GEOMETRIC TOE: the linear equivalent at the quoted spec diameter, paired with the diameter it
+// assumes (never show a linear toe without its diameter). Returns '' when no linear value is stored.
+function toeLinearNote(reading) {
+  if (!Number.isFinite(reading.toeLinear)) return '';
+  const unit = reading.toeUnits === 'in' ? 'in' : 'mm';
+  const sign = reading.toeLinear >= 0 ? '+' : '';
+  const at = Number.isFinite(reading.toeSpecDiameter) && reading.toeSpecDiameter > 0
+    ? ` @${reading.toeSpecDiameter}${unit}`
+    : '';
+  return `${sign}${reading.toeLinear.toFixed(2)}${unit}${at}`;
+}
+
+// Saved-readings meta line, honest about how the value was obtained (sensor vs geometric toe).
+function savedNoteForReading(reading) {
+  const parts = [`Saved ${formatTime(reading.time)}`];
+  if (reading.workflow === 'geometric') {
+    parts.push(`geometric ${reading.toeMethod || 'toe'}`);
+    // Per-wheel vs total + the linear equivalent at its quoted diameter, surfaced everywhere toe shows.
+    const linear = toeLinearNote(reading);
+    if (linear) parts.push(linear);
+    if (reading.toeMethod === 'string-box') {
+      if (Number.isFinite(reading.toeThrust)) parts.push(`thrust ${formatSigned(reading.toeThrust)}`);
+      parts.push('per-wheel (L/R split)');
+    } else {
+      if (reading.toeSymmetryAssumed) parts.push('total/2 symmetry');
+      parts.push(reading.toeRunoutFault
+        ? `runout fault Δ${formatNumber(reading.toeRunoutDisagreement || 0)}°`
+        : 'runout ok');
+    }
+  } else if (reading.workflow === 'precision') {
+    parts.push(`precision ${reading.repeatabilityScore || 0}%`);
+    parts.push(reading.trustVerdict || `${reading.samples} samples`);
+  } else {
+    parts.push(`${reading.confidence}% confidence`);
+    parts.push(`${reading.samples} samples`);
+  }
+  return parts.filter(Boolean).join(' • ');
+}
+
+// Short per-corner note for the workflow results grid, honest about how the value was obtained.
+function specNoteForReading(reading) {
+  if (reading.workflow === 'geometric') {
+    if (reading.toeRunoutFault) return 'Geometric • runout fault';
+    // Per-wheel toe values carry their linear equivalent (with the diameter it assumes) inline.
+    const linear = toeLinearNote(reading);
+    const base = reading.trustVerdict || 'Geometric toe';
+    return linear ? `${base} • ${linear}` : base;
+  }
+  if (reading.workflow === 'precision') {
+    return reading.trustVerdict || 'Precision saved';
+  }
+  return `${reading.confidence}% confidence`;
+}
+
 function refreshWorkflowResults() {
   const readings = SIDES.map(side => measurementFor(state.mode, side));
   const savedCount = readings.filter(Boolean).length;
@@ -2223,16 +2785,26 @@ function refreshWorkflowResults() {
     item.appendChild(buildElement('span', 'spec-label', side));
     item.appendChild(buildElement('strong', 'spec-value', reading ? formatSigned(reading.value) : 'Pending'));
     item.appendChild(buildElement('small', 'spec-note', reading
-      ? `${reading.workflow === 'precision' ? (reading.trustVerdict || 'Precision saved') : `${reading.confidence}% confidence`}`
+      ? specNoteForReading(reading)
       : 'Collect when guided'));
     grid.appendChild(item);
   });
 
   const frontDelta = deltaFor(state.mode, 'FL', 'FR');
   const rearDelta = deltaFor(state.mode, 'RL', 'RR');
+  // GEOMETRIC TOE: in toe mode reuse the shared toeDeltaNote so the grid flags a plates-only pair
+  // as "Δ is 0 by assumption" instead of the misleading generic "FL − FR" — matching the
+  // saved-readings card exactly. Other modes keep the literal subtraction note.
+  const isToe = state.mode === 'toe';
+  const frontDeltaNote = frontDelta === null
+    ? 'Needs FL + FR'
+    : (isToe ? toeDeltaNote('FL', 'FR', frontDelta, 'front') : 'FL − FR');
+  const rearDeltaNote = rearDelta === null
+    ? 'Needs RL + RR'
+    : (isToe ? toeDeltaNote('RL', 'RR', rearDelta, 'rear') : 'RL − RR');
   [
-    ['Front Δ', frontDelta === null ? 'Pending' : formatSigned(frontDelta), frontDelta === null ? 'Needs FL + FR' : 'FL − FR'],
-    ['Rear Δ', rearDelta === null ? 'Pending' : formatSigned(rearDelta), rearDelta === null ? 'Needs RL + RR' : 'RL − RR'],
+    ['Front Δ', frontDelta === null ? 'Pending' : formatSigned(frontDelta), frontDeltaNote],
+    ['Rear Δ', rearDelta === null ? 'Pending' : formatSigned(rearDelta), rearDeltaNote],
     ['Baseline', baseline.complete ? baseline.label : `${baseline.completedSides}/4`, state.workflow === 'precision' ? 'Level plane quality' : 'Use Level first'],
   ].forEach(([label, value, note]) => {
     const item = buildElement('div', `spec-item${value !== 'Pending' ? ' ready' : ''}`);
@@ -2258,22 +2830,21 @@ function refreshSavedReadings() {
   // P1-4 / Stage 5: the saved-side box leads with the value AND its 95% band as one number.
   el('saved-side-value').textContent = current ? formatValueWithBand(current.value, current.toleranceDeg) : 'No saved reading';
   el('saved-side-note').textContent = current
-    ? [
-        `Saved ${formatTime(current.time)}`,
-        current.workflow === 'precision' ? `precision ${current.repeatabilityScore || 0}%` : `${current.confidence}% confidence`,
-        current.workflow === 'precision' && current.trustVerdict ? current.trustVerdict : `${current.samples} samples`,
-      ].filter(Boolean).join(' • ')
-    : `Hold the phone steady until it settles, then tap ${state.workflow === 'precision' ? 'Save Precision' : 'Save Avg'}.`;
+    ? savedNoteForReading(current)
+    : (state.mode === 'toe'
+        ? 'Enter the geometric toe wizard above, then tap Save toe reading.'
+        : `Hold the phone steady until it settles, then tap ${state.workflow === 'precision' ? 'Save Precision' : 'Save Avg'}.`);
 
   const frontDelta = deltaFor(state.mode, 'FL', 'FR');
   const rearDelta = deltaFor(state.mode, 'RL', 'RR');
   el('front-delta').textContent = frontDelta === null ? '—' : formatSigned(frontDelta);
   el('rear-delta').textContent = rearDelta === null ? '—' : formatSigned(rearDelta);
   if (state.mode === 'toe') {
-    // P0-2: a left/right tilt delta is NOT a toe delta — the sensor cannot read toe, so do not
-    // present these as valid toe-in/out comparisons.
-    el('front-delta-note').textContent = 'Not a toe value — measure toe geometrically (rim offset / rim length).';
-    el('rear-delta-note').textContent = 'Not a toe value — measure toe geometrically (rim offset / rim length).';
+    // GEOMETRIC TOE: toe values come from the wizard (geometric, sensor-free). The honest L-R
+    // delta note (symmetry-assumed vs real per-wheel) is shared with the workflow-results grid
+    // via toeDeltaNote so both surfaces describe the same save identically.
+    el('front-delta-note').textContent = toeDeltaNote('FL', 'FR', frontDelta, 'front');
+    el('rear-delta-note').textContent = toeDeltaNote('RL', 'RR', rearDelta, 'rear');
   } else {
     // P2-3: warn when a delta is computed across mismatched calibration/orientation contexts.
     const frontContext = deltaContextFor(state.mode, 'FL', 'FR');
@@ -2308,7 +2879,22 @@ function refreshSavedReadings() {
     const metaWrap = document.createElement('div');
     const label = buildElement('div', 'saved-label', item.side);
     const metaParts = [`Saved ${formatTime(item.time)}`];
-    if (item.workflow === 'precision') {
+    if (item.workflow === 'geometric') {
+      // GEOMETRIC TOE: surface the method, linear equivalent, and the basis (per-wheel split or
+      // total/2 symmetry + runout), not a fake %.
+      metaParts.push(`geometric ${item.toeMethod || 'toe'}`);
+      const linear = toeLinearNote(item);
+      if (linear) metaParts.push(linear);
+      if (item.toeMethod === 'string-box') {
+        if (Number.isFinite(item.toeThrust)) metaParts.push(`thrust ${formatSigned(item.toeThrust)}`);
+        metaParts.push('per-wheel (L/R split)');
+      } else {
+        if (item.toeSymmetryAssumed) metaParts.push('total/2 symmetry');
+        metaParts.push(item.toeRunoutFault
+          ? `runout fault Δ${formatNumber(item.toeRunoutDisagreement || 0)}°`
+          : 'runout ok');
+      }
+    } else if (item.workflow === 'precision') {
       metaParts.push(`${item.repeatabilityScore || 0}% repeatability`);
       // P1-5: surface n alongside the verdict so trust is tied to capture count.
       if (item.trustVerdict) metaParts.push(`${item.trustVerdict} (n=${item.captureCount || item.samples || 0})`);
@@ -2372,6 +2958,7 @@ function refreshUI() {
   refreshGuide();
   refreshReadiness();
   refreshGauge();
+  refreshToeWizard();
   refreshStatus();
   refreshCalibrationCard();
   refreshPrecisionCard();
@@ -2442,6 +3029,13 @@ function setupEventHandlers() {
       resetCalibration: () => resetCalibration(),
       selectSide: () => selectSide(arg),
       backFromInstructions: () => backFromInstructions(),
+      // GEOMETRIC TOE wizard actions (no inline onclick; routed through delegation like the rest).
+      setToeMethod: () => setToeMethod(arg),
+      saveToeMeasurement: () => saveToeMeasurement(),
+      resetToeWizard: () => resetToeWizard(),
+      // PRECISION string-box actions.
+      saveToeStringBox: () => saveToeStringBox(),
+      resetToeStringBox: () => resetToeStringBox(),
     };
     const handler = handlers[action];
     if (handler) handler();
@@ -2451,6 +3045,22 @@ function setupEventHandlers() {
   fixtureSelect.addEventListener('change', event => {
     selectFixture(event.target.value);
   });
+
+  // GEOMETRIC TOE: number inputs and selects emit input/change, not click, so route any control
+  // tagged data-action="toeInput" through setToeInput. `input` covers typing; `change` covers the
+  // <select> dropdowns. Delegated on document so the (hidden) toe pane needs no per-element wiring.
+  const handleToeInput = event => {
+    const trigger = event.target.closest('[data-action="toeInput"]');
+    if (trigger) {
+      setToeInput(trigger.dataset.arg, event.target.value);
+      return;
+    }
+    // PRECISION string-box per-corner gaps share the same delegated input/change path.
+    const stringTrigger = event.target.closest('[data-action="toeStringInput"]');
+    if (stringTrigger) setToeStringInput(stringTrigger.dataset.arg, event.target.value);
+  };
+  document.addEventListener('input', handleToeInput);
+  document.addEventListener('change', handleToeInput);
 
   el('fixture-form').addEventListener('submit', handleFixtureFormSubmit);
   el('fixture-form-cancel').addEventListener('click', closeFixtureDialog);

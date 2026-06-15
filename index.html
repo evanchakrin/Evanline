@@ -9,7 +9,7 @@
   <meta name="theme-color" content="#0d1117" />
   <link rel="manifest" href="manifest.json" />
   <title>Evanline – Wheel Alignment</title>
-    <link rel="stylesheet" href="assets/css/styles.css?v=12" />
+    <link rel="stylesheet" href="assets/css/styles.css?v=15" />
 
 </head>
 <body>
@@ -91,7 +91,7 @@
   <div class="mode-tabs" role="tablist" aria-label="Measurement mode selection">
     <button class="mode-tab active" data-mode="level" data-action="setMode" data-arg="level" role="tab" aria-selected="true">Level</button>
     <button class="mode-tab" data-mode="camber" data-action="setMode" data-arg="camber" role="tab" aria-selected="false">Camber</button>
-    <button class="mode-tab" data-mode="toe" data-action="setMode" data-arg="toe" role="tab" aria-selected="false" title="Toe is geometric, not a sensor reading">Toe*</button>
+    <button class="mode-tab" data-mode="toe" data-action="setMode" data-arg="toe" role="tab" aria-selected="false" title="Toe is a guided geometric calculation, not a sensor reading">Toe (geometric)</button>
     <button class="mode-tab" data-mode="pitch" data-action="setMode" data-arg="pitch" role="tab" aria-selected="false">Pitch</button>
   </div>
 
@@ -132,6 +132,245 @@
       <strong id="readiness-next">Enable sensors</strong>
       <small id="readiness-next-sub">Follow the guide</small>
     </div>
+  </div>
+
+  <div class="gauge-card toe-wizard hidden-panel" id="toe-wizard">
+    <span class="gauge-label">Geometric toe wizard</span>
+    <div class="guide-step">Measure toe geometrically</div>
+    <p class="guide-text">A phone cannot sense toe. Enter measured rim/plate gaps and the app is the calculator + uncertainty engine. Toe-in is positive. Target accuracy ~0.1–0.3°.</p>
+
+    <div class="mode-explainer" role="note">
+      <strong>Runout is the dominant error.</strong>
+      <span id="toe-runout-headline">Roll the wheel ~180°, re-seat, and measure twice. The app refuses a single read and averages the two so rim runout cancels. Reference the rim, never the tire sidewall or lettering.</span>
+    </div>
+
+    <details class="panel-section" open id="toe-setup-section">
+      <summary>1 · Setup (required)</summary>
+      <div class="panel-section-content">
+        <div class="toe-field-grid">
+          <label class="toe-field">
+            <span>Reference span / diameter D</span>
+            <input class="form-input" type="number" inputmode="decimal" step="any" min="0" id="toe-diameter" data-action="toeInput" data-arg="diameter" placeholder="measured pickup span" />
+            <small>Enter a MEASURED span (plate height or rim mark spacing), not a nominal lookup. Output scales as 1/D.</small>
+          </label>
+          <label class="toe-field">
+            <span>Units</span>
+            <select class="form-select" id="toe-units" data-action="toeInput" data-arg="units">
+              <option value="mm">mm</option>
+              <option value="in">in</option>
+            </select>
+          </label>
+          <label class="toe-field">
+            <span>Spec type</span>
+            <select class="form-select" id="toe-spec-type" data-action="toeInput" data-arg="specType">
+              <option value="total">Total axle</option>
+              <option value="perWheel">Per-wheel</option>
+            </select>
+          </label>
+          <label class="toe-field">
+            <span>Spec quoted at diameter</span>
+            <input class="form-input" type="number" inputmode="decimal" step="any" min="0" id="toe-spec-diameter" data-action="toeInput" data-arg="specDiameter" placeholder="e.g. 28.648 in" />
+            <small>The diameter the LINEAR spec assumes. Never show a linear toe without it.</small>
+          </label>
+          <label class="toe-field">
+            <span>Read uncertainty u</span>
+            <input class="form-input" type="number" inputmode="decimal" step="any" min="0" id="toe-read-uncertainty" data-action="toeInput" data-arg="readUncertainty" placeholder="0.8 mm = 1/32 in" />
+            <small>Default 0.8 mm (1/32 in). Same units as D.</small>
+          </label>
+        </div>
+      </div>
+    </details>
+
+    <div class="toe-method-tabs" role="tablist" aria-label="Toe method">
+      <button class="toe-method-tab active" id="toe-method-plates" data-action="setToeMethod" data-arg="plates" role="tab" aria-selected="true">Plates / tapes</button>
+      <button class="toe-method-tab" id="toe-method-tape" data-action="setToeMethod" data-arg="tape" role="tab" aria-selected="false">Tape only (fallback)</button>
+    </div>
+    <p class="guide-text" id="toe-method-hint">Plates + 2 tapes give TOTAL axle toe directly: measure the gap between the plates at the FRONT (F) and REAR (R) of the front tires over span D.</p>
+
+    <div class="warning-text" id="toe-settle-hint" role="note">Settle hygiene: roll straight forward, bounce the suspension to settle, and reference the RIM not the tire sidewall/lettering.</div>
+
+    <div class="toe-reads">
+      <div class="toe-read-pair">
+        <span class="toe-read-title">Read-pair A (first seating)</span>
+        <div class="toe-pair-inputs">
+          <label class="toe-field">
+            <span id="toe-front-label-1">Front gap F</span>
+            <input class="form-input" type="number" inputmode="decimal" step="any" id="toe-front-1" data-action="toeInput" data-arg="front1" placeholder="F" />
+          </label>
+          <label class="toe-field">
+            <span id="toe-rear-label-1">Rear gap R</span>
+            <input class="form-input" type="number" inputmode="decimal" step="any" id="toe-rear-1" data-action="toeInput" data-arg="rear1" placeholder="R" />
+          </label>
+        </div>
+      </div>
+      <div class="toe-read-pair">
+        <span class="toe-read-title">Read-pair B (after ~180° roll &amp; re-seat)</span>
+        <div class="toe-pair-inputs">
+          <label class="toe-field">
+            <span id="toe-front-label-2">Front gap F</span>
+            <input class="form-input" type="number" inputmode="decimal" step="any" id="toe-front-2" data-action="toeInput" data-arg="front2" placeholder="F" />
+          </label>
+          <label class="toe-field">
+            <span id="toe-rear-label-2">Rear gap R</span>
+            <input class="form-input" type="number" inputmode="decimal" step="any" id="toe-rear-2" data-action="toeInput" data-arg="rear2" placeholder="R" />
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <div class="toe-result" id="toe-result">
+      <div class="status-chip">
+        <span class="status-chip-label">Total axle toe</span>
+        <span class="status-chip-value" id="toe-total-value">—</span>
+        <span class="status-chip-sub" id="toe-total-sub">Enter both read-pairs to compute.</span>
+      </div>
+      <div class="status-chip">
+        <span class="status-chip-label">Per-wheel (= total / 2)</span>
+        <span class="status-chip-value" id="toe-perwheel-value">—</span>
+        <span class="status-chip-sub" id="toe-perwheel-sub">Assumes left–right symmetry — plates cannot split L vs R.</span>
+      </div>
+      <div class="status-chip">
+        <span class="status-chip-label">Linear equivalent</span>
+        <span class="status-chip-value" id="toe-linear-value">—</span>
+        <span class="status-chip-sub" id="toe-linear-sub">At the quoted spec diameter.</span>
+      </div>
+      <div class="status-chip">
+        <span class="status-chip-label">Runout check</span>
+        <span class="status-chip-value" id="toe-runout-value">—</span>
+        <span class="status-chip-sub" id="toe-runout-sub">Disagreement between the two read-pairs.</span>
+      </div>
+    </div>
+
+    <div class="warning-text" id="toe-verdict" role="status" aria-live="polite">Enter setup and both read-pairs to compute toe.</div>
+
+    <div class="toe-save-row">
+      <label class="toe-field toe-save-side">
+        <span>Save to side(s)</span>
+        <select class="form-select" id="toe-save-side" data-action="toeInput" data-arg="saveSide">
+          <option value="front">Front pair (FL + FR)</option>
+          <option value="rear">Rear pair (RL + RR)</option>
+          <option value="FL">FL</option>
+          <option value="FR">FR</option>
+          <option value="RL">RL</option>
+          <option value="RR">RR</option>
+        </select>
+      </label>
+      <button class="btn btn-primary btn-small" id="btn-save-toe" data-action="saveToeMeasurement">Save toe reading</button>
+      <button class="btn btn-surface btn-small" id="btn-reset-toe" data-action="resetToeWizard">Reset wizard</button>
+    </div>
+    <div class="control-hint" id="toe-save-hint">Total toe saves to the front (or rear) pair under the symmetry flag; per-wheel saves the entered side.</div>
+
+    <details class="panel-section toe-stringbox hidden-panel" id="toe-stringbox" open>
+      <summary>Precision · string-box per-wheel + thrust</summary>
+      <div class="panel-section-content">
+        <p class="guide-text">Pull two strings parallel to the car (one down each side, equal stand-off front and rear). For each wheel, measure the gap from the string to the rim at the FRONT edge and the REAR edge over span D. This splits L vs R, gives total front/rear toe, and the THRUST angle — no symmetry assumption.</p>
+
+        <div class="warning-text" id="toe-stringbox-heading-warn" role="note">Do not use the phone compass to square the box near the car body — indoor steel and the body distort the heading. Square the box geometrically (equal diagonals / 3-4-5), never off the magnetometer.</div>
+
+        <details class="panel-section" open>
+          <summary>Box-squaring checklist</summary>
+          <div class="panel-section-content">
+            <ul class="toe-checklist">
+              <li>Set both strings the SAME stand-off from the hub centers, front and rear.</li>
+              <li>Square the box with equal diagonals or a 3-4-5 triangle — not the compass.</li>
+              <li>Reference the RIM at a repeatable radius, never the tire sidewall or lettering.</li>
+              <li>Roll the car forward and re-seat before reading to settle suspension and cancel runout.</li>
+              <li>Keep the string height level so front/rear gaps are read at the same point.</li>
+            </ul>
+          </div>
+        </details>
+
+        <div class="toe-stringbox-grid">
+          <div class="toe-corner" data-corner="FL">
+            <span class="toe-corner-title">FL — front-left</span>
+            <div class="toe-pair-inputs">
+              <label class="toe-field">
+                <span>Front gap</span>
+                <input class="form-input" type="number" inputmode="decimal" step="any" id="toe-sb-FL-front" data-action="toeStringInput" data-arg="FL.front" placeholder="string→rim front" />
+              </label>
+              <label class="toe-field">
+                <span>Rear gap</span>
+                <input class="form-input" type="number" inputmode="decimal" step="any" id="toe-sb-FL-rear" data-action="toeStringInput" data-arg="FL.rear" placeholder="string→rim rear" />
+              </label>
+            </div>
+            <span class="toe-corner-result" id="toe-sb-FL-result">—</span>
+          </div>
+          <div class="toe-corner" data-corner="FR">
+            <span class="toe-corner-title">FR — front-right</span>
+            <div class="toe-pair-inputs">
+              <label class="toe-field">
+                <span>Front gap</span>
+                <input class="form-input" type="number" inputmode="decimal" step="any" id="toe-sb-FR-front" data-action="toeStringInput" data-arg="FR.front" placeholder="string→rim front" />
+              </label>
+              <label class="toe-field">
+                <span>Rear gap</span>
+                <input class="form-input" type="number" inputmode="decimal" step="any" id="toe-sb-FR-rear" data-action="toeStringInput" data-arg="FR.rear" placeholder="string→rim rear" />
+              </label>
+            </div>
+            <span class="toe-corner-result" id="toe-sb-FR-result">—</span>
+          </div>
+          <div class="toe-corner" data-corner="RL">
+            <span class="toe-corner-title">RL — rear-left</span>
+            <div class="toe-pair-inputs">
+              <label class="toe-field">
+                <span>Front gap</span>
+                <input class="form-input" type="number" inputmode="decimal" step="any" id="toe-sb-RL-front" data-action="toeStringInput" data-arg="RL.front" placeholder="string→rim front" />
+              </label>
+              <label class="toe-field">
+                <span>Rear gap</span>
+                <input class="form-input" type="number" inputmode="decimal" step="any" id="toe-sb-RL-rear" data-action="toeStringInput" data-arg="RL.rear" placeholder="string→rim rear" />
+              </label>
+            </div>
+            <span class="toe-corner-result" id="toe-sb-RL-result">—</span>
+          </div>
+          <div class="toe-corner" data-corner="RR">
+            <span class="toe-corner-title">RR — rear-right</span>
+            <div class="toe-pair-inputs">
+              <label class="toe-field">
+                <span>Front gap</span>
+                <input class="form-input" type="number" inputmode="decimal" step="any" id="toe-sb-RR-front" data-action="toeStringInput" data-arg="RR.front" placeholder="string→rim front" />
+              </label>
+              <label class="toe-field">
+                <span>Rear gap</span>
+                <input class="form-input" type="number" inputmode="decimal" step="any" id="toe-sb-RR-rear" data-action="toeStringInput" data-arg="RR.rear" placeholder="string→rim rear" />
+              </label>
+            </div>
+            <span class="toe-corner-result" id="toe-sb-RR-result">—</span>
+          </div>
+        </div>
+
+        <div class="toe-result" id="toe-stringbox-result">
+          <div class="status-chip">
+            <span class="status-chip-label">Total front toe</span>
+            <span class="status-chip-value" id="toe-sb-total-front">—</span>
+            <span class="status-chip-sub" id="toe-sb-total-front-sub">FL + FR per-wheel.</span>
+          </div>
+          <div class="status-chip">
+            <span class="status-chip-label">Total rear toe</span>
+            <span class="status-chip-value" id="toe-sb-total-rear">—</span>
+            <span class="status-chip-sub" id="toe-sb-total-rear-sub">RL + RR per-wheel.</span>
+          </div>
+          <div class="status-chip">
+            <span class="status-chip-label">Thrust angle</span>
+            <span class="status-chip-value" id="toe-sb-thrust">—</span>
+            <span class="status-chip-sub" id="toe-sb-thrust-sub">(RL − RR) / 2 • + points left.</span>
+          </div>
+          <div class="status-chip">
+            <span class="status-chip-label">Front, thrust-referenced</span>
+            <span class="status-chip-value" id="toe-sb-front-ref">—</span>
+            <span class="status-chip-sub" id="toe-sb-front-ref-sub">FL/FR corrected to the thrust line.</span>
+          </div>
+        </div>
+
+        <div class="warning-text" id="toe-stringbox-verdict" role="status" aria-live="polite">Enter all four corners to compute per-wheel toe, totals, and thrust.</div>
+
+        <div class="toe-save-row">
+          <button class="btn btn-primary btn-small" id="btn-save-toe-stringbox" data-action="saveToeStringBox">Save per-wheel toe (4 corners)</button>
+          <button class="btn btn-surface btn-small" id="btn-reset-toe-stringbox" data-action="resetToeStringBox">Reset string box</button>
+        </div>
+        <div class="control-hint">Saves each corner's per-wheel toe to FL/FR/RL/RR with the ± band and the thrust/linear context — no symmetry assumption.</div>
+      </div>
+    </details>
   </div>
 
   <div class="gauge-card precision-card hidden-panel" id="precision-card">
@@ -281,8 +520,8 @@
     <span class="gauge-label" id="gauge-mode-label">Camber Angle</span>
 
     <div class="mode-explainer hidden-panel" id="toe-explainer" role="status" aria-live="polite">
-      <strong>Toe is not a sensor reading.</strong>
-      <span>A phone is blind to rotation about vertical and has no vehicle centerline, so it cannot measure toe. Measure it geometrically: toe ≈ atan(front-vs-rear rim offset / rim length), or use string lines / turn plates. The gauge below is parked at 0° in this mode.</span>
+      <strong>Toe is geometric, not a sensor reading.</strong>
+      <span>A phone is blind to rotation about vertical and has no vehicle centerline, so it cannot sense toe. The geometric toe wizard above is the real calculator: enter measured rim/plate gaps and it computes toe = atan(front-vs-rear offset / D) with an uncertainty band. The gauge below is parked at 0° in this mode.</span>
     </div>
 
     <svg id="gauge-svg" viewBox="0 0 300 180" xmlns="http://www.w3.org/2000/svg">
@@ -460,8 +699,8 @@
       <p>Quick mode still works for fast checks. For best repeatability, switch to Precision, use a rigid jig, capture a Level baseline around the car, then take repeated forward and reversed readings before saving camber.</p>
     </div>
     <div class="mode-card">
-      <h4>Toe (experimental)</h4>
-      <p><strong>The phone cannot measure toe.</strong> A gravity sensor is blind to rotation about the vertical axis, and toe needs a vehicle-centerline reference the app never captures. Measure toe <em>geometrically</em> instead: clamp a straight edge or known length across each rim, measure the front-vs-rear offset, and compute toe ≈ atan(offset / rim length). String lines pulled parallel to the thrust line or a pair of turn plates give the same result. Use the other modes (camber, level, pitch) for real sensor readings.</p>
+      <h4>Toe (geometric)</h4>
+      <p><strong>The phone cannot sense toe</strong> — a gravity sensor is blind to rotation about the vertical axis and there is no vehicle-centerline reference. So the Toe tab is a <em>guided geometric calculator</em>, not a sensor read. <strong>Quick path:</strong> plates + 2 tapes give TOTAL axle toe = atan((rear gap R − front gap F) / measured span D); enter a <strong>measured</strong> reference span (not a nominal lookup), then do the forced <strong>roll-and-average runout step</strong> — roll the wheel ~180°, re-seat, and measure again so rim runout cancels (the app refuses a single read). Always reference the <strong>rim, not the tire sidewall or lettering</strong>. <strong>Precision path:</strong> a string box splits left vs right per wheel and reports total front/rear toe plus the <strong>thrust angle</strong>; square the box geometrically (equal diagonals / 3-4-5), never off the phone compass. Every result carries a ±band and the linear equivalent at the diameter it assumes. Honest accuracy is ~0.2–0.3°.</p>
     </div>
     <div class="mode-card">
       <h4>Level</h4>
@@ -493,7 +732,7 @@
       <div class="step-num step-num-warn">T</div>
       <div class="step-body">
         <span class="step-title">Toe — geometric method only</span>
-        <span class="step-desc">Do not try to read toe from phone tilt. Measure the front-vs-rear rim offset with a string line, turn plates, or a straight edge, then compute toe ≈ atan(offset / rim length).</span>
+        <span class="step-desc">Do not read toe from phone tilt. Use the guided Toe wizard: enter the front-vs-rear rim/plate gap over a <strong>measured</strong> reference span D (the app computes atan(offset / D)). Roll the wheel ~180° and re-measure so runout averages out, and reference the <strong>rim, never the tire sidewall or lettering</strong>. The precision string-box path adds per-wheel split and thrust angle.</span>
       </div>
     </div>
   </div>
@@ -565,7 +804,7 @@
   <div class="instr-spacer"></div>
 </div>
 
-<script type="module" src="assets/js/app.js?v=12"></script>
+<script type="module" src="assets/js/app.js?v=15"></script>
 
 <dialog id="fixture-dialog" class="fixture-dialog" aria-labelledby="fixture-dialog-title">
   <form method="dialog" id="fixture-form" class="fixture-form">

@@ -203,6 +203,16 @@ export function normalizeCalibrationMeta(item) {
 // and the bounded save history. Extracted from loadState so the tolerant coercion is testable and
 // so old data (no stamps, no history) loads unchanged. `nowIso` is injected for determinism.
 // `maxHistory` bounds how many prior values are retained per mode+side.
+// GEOMETRIC TOE (Stage 2): the 'geometric' workflow and the toe* stamps are preserved here so a
+// saved geometric toe reading round-trips through storage; legacy/sensor readings carry null/false
+// for every toe field, so nothing changes for camber/level/pitch or pre-existing data.
+const KNOWN_WORKFLOWS = ['quick', 'precision', 'geometric'];
+// GEOMETRIC TOE methods that round-trip through storage: the quick plates/tape paths (TOTAL toe)
+// and the Stage 3 PRECISION 'string-box' path (per-wheel + thrust). Anything else coerces to null.
+const TOE_METHODS = ['plates', 'tape', 'string-box'];
+function normalizeWorkflow(workflow) {
+  return KNOWN_WORKFLOWS.includes(workflow) ? workflow : 'quick';
+}
 export function normalizeMeasurement(item = {}, nowIso = new Date().toISOString(), maxHistory = 4) {
   const history = Array.isArray(item.history)
     ? item.history
@@ -213,7 +223,7 @@ export function normalizeMeasurement(item = {}, nowIso = new Date().toISOString(
           time: typeof entry.time === 'string' ? entry.time : nowIso,
           confidence: Number.isFinite(entry.confidence) ? entry.confidence : 0,
           toleranceDeg: Number.isFinite(entry.toleranceDeg) ? Number(entry.toleranceDeg) : null,
-          workflow: entry.workflow === 'precision' ? 'precision' : 'quick',
+          workflow: normalizeWorkflow(entry.workflow),
         }))
     : [];
   return {
@@ -226,7 +236,7 @@ export function normalizeMeasurement(item = {}, nowIso = new Date().toISOString(
     toleranceDeg: Number.isFinite(item.toleranceDeg) ? Number(item.toleranceDeg) : null,
     samples: Number.isFinite(item.samples) ? item.samples : 0,
     time: typeof item.time === 'string' ? item.time : nowIso,
-    workflow: item.workflow === 'precision' ? 'precision' : 'quick',
+    workflow: normalizeWorkflow(item.workflow),
     rawValue: Number.isFinite(item.rawValue) ? Number(item.rawValue) : null,
     correctedValue: Number.isFinite(item.correctedValue) ? Number(item.correctedValue) : null,
     reversalBias: Number.isFinite(item.reversalBias) ? Number(item.reversalBias) : null,
@@ -242,6 +252,20 @@ export function normalizeMeasurement(item = {}, nowIso = new Date().toISOString(
     orientation: item.orientation === 'landscape' || item.orientation === 'portrait' ? item.orientation : null,
     pose: item.pose === 'landscape' || item.pose === 'portrait' ? item.pose : null,
     deviceRefTime: typeof item.deviceRefTime === 'string' ? item.deviceRefTime : null,
+    // GEOMETRIC TOE: geometric-method context stamps (null/false on every non-toe reading).
+    // Stage 3 adds the PRECISION 'string-box' method and the thrust-angle stamp.
+    toeMethod: TOE_METHODS.includes(item.toeMethod) ? item.toeMethod : null,
+    toeUnits: item.toeUnits === 'in' || item.toeUnits === 'mm' ? item.toeUnits : null,
+    toeDiameter: Number.isFinite(item.toeDiameter) ? Number(item.toeDiameter) : null,
+    toeSpecDiameter: Number.isFinite(item.toeSpecDiameter) ? Number(item.toeSpecDiameter) : null,
+    toeTotal: Number.isFinite(item.toeTotal) ? Number(item.toeTotal) : null,
+    toePerWheel: Number.isFinite(item.toePerWheel) ? Number(item.toePerWheel) : null,
+    toeLinear: Number.isFinite(item.toeLinear) ? Number(item.toeLinear) : null,
+    // PRECISION string-box thrust angle; null on plates/tape/sensor readings.
+    toeThrust: Number.isFinite(item.toeThrust) ? Number(item.toeThrust) : null,
+    toeSymmetryAssumed: item.toeSymmetryAssumed === true,
+    toeRunoutDisagreement: Number.isFinite(item.toeRunoutDisagreement) ? Number(item.toeRunoutDisagreement) : null,
+    toeRunoutFault: item.toeRunoutFault === true,
     history,
   };
 }
@@ -480,6 +504,269 @@ export function flipSelfTest(firstReading, secondReading, tolerance = 0.2) {
     corrected,
     passed: Math.abs(residualBias) <= tolerance,
     tolerance,
+  };
+}
+
+// --- GEOMETRIC TOE -----------------------------------------------------------------------------
+// A phone cannot SENSE toe (rotation about vertical relative to the vehicle centerline; a gravity
+// inclinometer is blind to it, and compass/gyro/camera fail on physics or platform). The honest,
+// accurate path is GEOMETRIC measurement: the phone is the calculator + procedure coach +
+// uncertainty-band engine. These helpers are PURE and use NO sensors — toe is plain atan arithmetic
+// from user-entered measurements. Target accuracy ~0.1-0.3 deg. All angles are in DEGREES and use
+// the exact atan (never a small-angle approximation). SIGN CONVENTION: TOE-IN is POSITIVE.
+
+// Per-wheel toe from a front-vs-rear offset measured over a reference diameter/length D (e.g. rim
+// diameter or plate height): theta = atan((rear - front) / D). rear - front > 0 means the wheel's
+// leading/front edge is nearer the vehicle centerline than the trailing edge => TOE-IN => POSITIVE.
+// Returns null on non-finite inputs or diameter <= 0 (output scales as 1/D, so D must be positive).
+export function toeAngleFromOffset(rear, front, diameter) {
+  if (!Number.isFinite(rear) || !Number.isFinite(front) || !Number.isFinite(diameter) || diameter <= 0) return null;
+  return Math.atan((rear - front) / diameter) * 180 / Math.PI;
+}
+
+// TOTAL axle toe directly from a pair of plates/tapes: total = atan((rearSpan - frontSpan) /
+// plateSpan), where rearSpan (R) is the distance between the two plates measured at the REAR of the
+// front tires, frontSpan (F) at the FRONT, and plateSpan (S) is the plate span/height between those
+// two reads. Toe-in (R > F) is positive. Returns null on non-finite inputs or plateSpan <= 0.
+export function totalToeFromPlates(rearSpan, frontSpan, plateSpan) {
+  if (!Number.isFinite(rearSpan) || !Number.isFinite(frontSpan) || !Number.isFinite(plateSpan) || plateSpan <= 0) return null;
+  return Math.atan((rearSpan - frontSpan) / plateSpan) * 180 / Math.PI;
+}
+
+// Symmetry-assumption helper: split a TOTAL axle toe into per-wheel toe assuming left-right
+// symmetry. Plates alone cannot split L vs R, so the UI must FLAG this as an assumption. Returns
+// null when totalToe is non-finite.
+export function perWheelFromTotal(totalToe) {
+  if (!Number.isFinite(totalToe)) return null;
+  return totalToe / 2;
+}
+
+// Thrust angle from the rear-axle per-wheel toe values: thrust = (toeRL - toeRR) / 2. Positive =>
+// the thrust line points to the LEFT. Front per-wheel toe referenced to the geometric centerline is
+// corrected to thrust-referenced by subtracting the thrust angle (sign per side) at the call site.
+// Returns null when either rear toe is non-finite.
+export function thrustAngle(toeRL, toeRR) {
+  if (!Number.isFinite(toeRL) || !Number.isFinite(toeRR)) return null;
+  return (toeRL - toeRR) / 2;
+}
+
+// Convert an angular toe to its LINEAR equivalent at a quoted spec diameter: linear =
+// specDiameter * tan(angleDeg). Always pair a linear toe with the diameter it assumes. Returns null
+// on non-finite inputs or specDiameter <= 0.
+export function toeAngleToLinear(angleDeg, specDiameter) {
+  if (!Number.isFinite(angleDeg) || !Number.isFinite(specDiameter) || specDiameter <= 0) return null;
+  return specDiameter * Math.tan(angleDeg * Math.PI / 180);
+}
+
+// Inverse of toeAngleToLinear: angle = atan(linear / specDiameter) in degrees. Returns null on
+// non-finite inputs or specDiameter <= 0. Self-check: atan(1/28.648) ~= 1.999 deg ("1 inch = 2
+// degrees"); atan(1/381) ~= 0.150 deg (1 mm on a 15 in wheel).
+export function linearToToeAngle(linear, specDiameter) {
+  if (!Number.isFinite(linear) || !Number.isFinite(specDiameter) || specDiameter <= 0) return null;
+  return Math.atan(linear / specDiameter) * 180 / Math.PI;
+}
+
+// Propagated +/- band half-width (DEGREES) for a toe read. A linear read uncertainty u (default
+// 0.8 mm = 1/32 in, supply in the SAME units as `diameter`) propagates as dtheta ~= u / D radians.
+// For a DIFFERENTIAL of two reads (a front and a rear measurement, as every toe read is) multiply
+// by sqrt(2). Reported with coverage factor k = 2 (~95%), matching the app's existing tolerance
+// band. Returns null on non-finite inputs or diameter <= 0.
+export function toeReadUncertaintyDeg(readUncertainty, diameter, differential = true) {
+  if (!Number.isFinite(readUncertainty) || !Number.isFinite(diameter) || diameter <= 0) return null;
+  const factor = differential ? Math.SQRT2 : 1;
+  return 2 * (readUncertainty / diameter) * factor * 180 / Math.PI;
+}
+
+// Runout / seating check for the FORCED roll-and-average step. Each toe read is taken twice (the
+// wheel rolled ~180 deg between reads so rim runout and seating errors flip sign and cancel in the
+// average). This returns whether the TWO read-pair angles disagree by more than `threshold` degrees
+// — a large disagreement is the DOMINANT toe error (runout/seating fault), not a footnote. Returns
+// { disagreement, exceeds, ready }: `ready` is true only when BOTH angles are finite (we refuse to
+// finalize on a single read). `threshold` defaults to 0.25 deg. Pure; no rounding.
+export function toeRunoutDisagreement(angleA, angleB, threshold = 0.25) {
+  const aOk = Number.isFinite(angleA);
+  const bOk = Number.isFinite(angleB);
+  if (!aOk || !bOk) {
+    return { disagreement: null, exceeds: false, ready: false };
+  }
+  const disagreement = Math.abs(angleA - angleB);
+  const limit = Number.isFinite(threshold) && threshold >= 0 ? threshold : 0.25;
+  return { disagreement, exceeds: disagreement > limit, ready: true };
+}
+
+// Pure orchestrator for the geometric TOE wizard. Combines the atan helpers above into one result
+// from a setup + the forced two read-pairs (roll-and-average). NO sensors — plain atan arithmetic.
+//
+// `setup`: {
+//   method: 'plates' | 'tape'  — plates/tape both yield TOTAL axle toe via the same atan,
+//   diameter:    reference length D the front/rear reads span (plate span, or tape mark radius pair);
+//   specType: 'total' | 'perWheel' — how the user's TARGET spec is quoted (informational here);
+//   specDiameter: the diameter the LINEAR spec is quoted at (for the linear equivalent);
+//   readUncertainty: linear read uncertainty u (same units as diameter; default supplied by caller);
+//   runoutThreshold: max allowed disagreement (deg) between the two read-pairs (default 0.25).
+// }
+// `reads`: an array of read-pairs, each { front, rear } in the SAME linear units as diameter. EXACTLY
+// two finite pairs are required (the forced roll-and-average); fewer => not ready (single-read
+// refusal). front/rear are the gap between the two plates/marks at the FRONT and REAR of the tires.
+//
+// Returns { ready, reason, method, perPairAngles, totalToe, perWheelToe, toleranceDeg, runout,
+// totalLinear, perWheelLinear, specDiameter } with all angles in DEGREES, toe-in POSITIVE, and
+// perWheelToe = totalToe / 2 (a SYMMETRY ASSUMPTION the UI must flag). Nothing is rounded here.
+export function computeToeWizardResult(setup = {}, reads = []) {
+  const method = setup.method === 'tape' ? 'tape' : 'plates';
+  const diameter = setup.diameter;
+  const runoutThreshold = Number.isFinite(setup.runoutThreshold) ? setup.runoutThreshold : 0.25;
+  const specDiameter = Number.isFinite(setup.specDiameter) && setup.specDiameter > 0 ? setup.specDiameter : null;
+
+  const base = {
+    ready: false,
+    reason: '',
+    method,
+    perPairAngles: [],
+    totalToe: null,
+    perWheelToe: null,
+    toleranceDeg: null,
+    runout: { disagreement: null, exceeds: false, ready: false },
+    totalLinear: null,
+    perWheelLinear: null,
+    specDiameter,
+  };
+
+  if (!Number.isFinite(diameter) || diameter <= 0) {
+    return { ...base, reason: 'Enter a positive reference diameter / span before measuring.' };
+  }
+
+  // Each read-pair -> a TOTAL axle toe angle (plates and tape both: atan((rear - front) / D)).
+  const pairs = Array.isArray(reads) ? reads : [];
+  const perPairAngles = pairs.map(pair => {
+    if (!pair || !Number.isFinite(pair.front) || !Number.isFinite(pair.rear)) return null;
+    return totalToeFromPlates(pair.rear, pair.front, diameter);
+  });
+  const finiteAngles = perPairAngles.filter(angle => Number.isFinite(angle));
+
+  // FORCED roll-and-average: refuse to finalize on a single read.
+  if (finiteAngles.length < 2) {
+    return {
+      ...base,
+      perPairAngles,
+      reason: finiteAngles.length === 0
+        ? 'Enter the front and rear gaps for the first read-pair.'
+        : 'Enter the second read-pair after rolling ~180° of wheel rotation, then re-seat and re-measure.',
+    };
+  }
+
+  const runout = toeRunoutDisagreement(finiteAngles[0], finiteAngles[1], runoutThreshold);
+  const totalToe = average(finiteAngles);
+  const perWheelToe = perWheelFromTotal(totalToe);
+  const toleranceDeg = toeReadUncertaintyDeg(setup.readUncertainty, diameter, true);
+  const totalLinear = specDiameter === null ? null : toeAngleToLinear(totalToe, specDiameter);
+  const perWheelLinear = specDiameter === null ? null : toeAngleToLinear(perWheelToe, specDiameter);
+
+  return {
+    ...base,
+    ready: true,
+    reason: runout.exceeds
+      ? 'Runout/seating fault: the two read-pairs disagree. Re-seat the rim and re-measure before trusting this.'
+      : 'Total axle toe is ready to save.',
+    perPairAngles,
+    totalToe,
+    perWheelToe,
+    toleranceDeg,
+    runout,
+    totalLinear,
+    perWheelLinear,
+    specDiameter,
+  };
+}
+
+// GEOMETRIC TOE — PRECISION string-box path. Pure, sensor-free per-wheel toe for all four corners
+// plus the TOTAL front/rear toe and the THRUST ANGLE. The user pulls two strings parallel to the
+// car (one down each side) and, per wheel, measures the gap from the string to the rim at the FRONT
+// edge and the REAR edge over the reference length D. toe-in is POSITIVE.
+//
+// SIGN: a wheel toes IN when its leading (front) edge is nearer the vehicle centerline than the
+// trailing (rear) edge. With both strings OUTBOARD of the wheels, "nearer the centerline" means
+// "farther from the string", so on each side the toe-in offset is (frontGap - rearGap). The Stage 1
+// helper toeAngleFromOffset(rear, front, D) returns +atan((rear - front)/D); feeding it
+// (rear = frontGap, front = rearGap) yields +atan((frontGap - rearGap)/D) = toe-in positive for BOTH
+// sides, so left and right share one convention without a per-side flip.
+//
+// `setup`: { diameter (D, required > 0), specDiameter (for the linear equivalent, optional),
+//   readUncertainty (same units as D, for the +/- band, optional) }.
+// `corners`: { FL:{front,rear}, FR:{...}, RL:{...}, RR:{...} } string-to-rim gaps in the SAME units
+//   as D. A corner with non-finite or missing front/rear yields a null per-wheel angle.
+//
+// Returns { perWheel:{FL,FR,RL,RR}, totalFront, totalRear, thrust, frontThrustReferenced:{FL,FR},
+//   toleranceDeg, specDiameter, perWheelLinear:{...}, ready, reason }. totalFront = toeFL + toeFR,
+//   totalRear = toeRL + toeRR, thrust = (toeRL - toeRR)/2 (+ = thrust line points LEFT). Front
+//   per-wheel toe is re-referenced from the geometric centerline to the THRUST line by subtracting
+//   the thrust angle on the left and adding it on the right. `ready` is true once all four corners
+//   resolve (every corner needed for total + thrust). Nothing is rounded here.
+export function computeToeStringBoxResult(setup = {}, corners = {}) {
+  const diameter = setup.diameter;
+  const specDiameter = Number.isFinite(setup.specDiameter) && setup.specDiameter > 0 ? setup.specDiameter : null;
+  const sideKeys = ['FL', 'FR', 'RL', 'RR'];
+
+  const perWheel = { FL: null, FR: null, RL: null, RR: null };
+  const perWheelLinear = { FL: null, FR: null, RL: null, RR: null };
+  const base = {
+    perWheel,
+    perWheelLinear,
+    totalFront: null,
+    totalRear: null,
+    thrust: null,
+    frontThrustReferenced: { FL: null, FR: null },
+    toleranceDeg: null,
+    specDiameter,
+    ready: false,
+    reason: '',
+  };
+
+  if (!Number.isFinite(diameter) || diameter <= 0) {
+    return { ...base, reason: 'Enter a positive reference diameter / length before measuring string offsets.' };
+  }
+
+  sideKeys.forEach(side => {
+    const corner = corners[side];
+    if (!corner || !Number.isFinite(corner.front) || !Number.isFinite(corner.rear)) return;
+    // toe-in positive: front gap larger than rear gap => leading edge farther from the outboard
+    // string => nearer the centerline => toe-IN. toeAngleFromOffset(rear=frontGap, front=rearGap, D).
+    perWheel[side] = toeAngleFromOffset(corner.front, corner.rear, diameter);
+    perWheelLinear[side] = specDiameter === null ? null : toeAngleToLinear(perWheel[side], specDiameter);
+  });
+
+  const toleranceDeg = toeReadUncertaintyDeg(setup.readUncertainty, diameter, true);
+  const allReady = sideKeys.every(side => Number.isFinite(perWheel[side]));
+
+  if (!allReady) {
+    const missing = sideKeys.filter(side => !Number.isFinite(perWheel[side]));
+    return {
+      ...base,
+      toleranceDeg,
+      reason: `Enter front and rear string offsets for: ${missing.join(', ')}.`,
+    };
+  }
+
+  const totalFront = perWheel.FL + perWheel.FR;
+  const totalRear = perWheel.RL + perWheel.RR;
+  const thrust = thrustAngle(perWheel.RL, perWheel.RR);
+  // Re-reference the FRONT per-wheel toe from the geometric centerline to the thrust line: the
+  // thrust line is rotated by `thrust` toward the left, so the left wheel's toe shrinks by `thrust`
+  // and the right wheel's grows by `thrust` to keep total front toe invariant.
+  const frontThrustReferenced = {
+    FL: perWheel.FL - thrust,
+    FR: perWheel.FR + thrust,
+  };
+
+  return {
+    ...base,
+    toleranceDeg,
+    totalFront,
+    totalRear,
+    thrust,
+    frontThrustReferenced,
+    ready: true,
+    reason: 'Per-wheel, total, and thrust angle are ready.',
   };
 }
 
