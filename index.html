@@ -9,7 +9,7 @@
   <meta name="theme-color" content="#0d1117" />
   <link rel="manifest" href="manifest.json" />
   <title>Evanline – Wheel Alignment</title>
-    <link rel="stylesheet" href="assets/css/styles.css?v=15" />
+    <link rel="stylesheet" href="assets/css/styles.css?v=16" />
 
 </head>
 <body>
@@ -35,7 +35,7 @@
   </div>
 
   <p class="welcome-desc">
-    Use your iPhone's built-in sensors to measure wheel camber, toe, vehicle level, and pitch — with smoothing, settled detection, and saved side-by-side comparisons.
+    Use your iPhone's built-in sensors to measure wheel camber, caster, toe, vehicle level, and pitch — with smoothing, settled detection, and saved side-by-side comparisons.
   </p>
 
   <div class="welcome-steps" aria-label="Setup preview">
@@ -770,6 +770,10 @@
       <p><strong>The phone cannot sense toe</strong> — a gravity sensor is blind to rotation about the vertical axis and there is no vehicle-centerline reference. So the Toe tab is a <em>guided geometric calculator</em>, not a sensor read. <strong>Quick path:</strong> plates + 2 tapes give TOTAL axle toe = atan((rear gap R − front gap F) / measured span D); enter a <strong>measured</strong> reference span (not a nominal lookup), then do the forced <strong>roll-and-average runout step</strong> — roll the wheel ~180°, re-seat, and measure again so rim runout cancels (the app refuses a single read). Always reference the <strong>rim, not the tire sidewall or lettering</strong>. <strong>Precision path:</strong> a string box splits left vs right per wheel and reports total front/rear toe plus the <strong>thrust angle</strong>; square the box geometrically (equal diagonals / 3-4-5), never off the phone compass. Every result carries a ±band and the linear equivalent at the diameter it assumes. Honest accuracy is ~0.2–0.3°.</p>
     </div>
     <div class="mode-card">
+      <h4>Caster (camber swing)</h4>
+      <p><strong>Caster is not a static gravity reading</strong> — a phone held still cannot sense it. Instead it is recovered from how <strong>camber</strong> changes as the wheel is steered. Hold the phone flush to the wheel face (the same camber pose), steer a known angle <strong>θ each way</strong> (use turn plates with degree markings or a printable degree disc; classic value 20°, total swing = 2θ), and capture a <strong>settled</strong> camber read at each position. caster = (camber<sub>out</sub> − camber<sub>in</sub>) / (2 · sin θ). Because it is a <strong>difference</strong> of two camber reads, any camber zero offset cancels — there is <strong>no zeroing step</strong>; capture raw camber both ways. Each read's ±band is propagated (≈2× the per-read camber band at 20°). It is a front-wheel measurement (FL/FR). The <strong>magnitude is robust, but the absolute sign must be validated against a known-caster reference</strong> (positive caster = top of the steering axis tilted rearward). Honest accuracy is ~±0.5–1°.</p>
+    </div>
+    <div class="mode-card">
       <h4>Level</h4>
       <p>Precision mode uses Level to capture FL, FR, RL, and RR baseline points. This turns one quick level check into a session-wide reference plane for later trust scoring.</p>
     </div>
@@ -786,6 +790,13 @@
       <div class="step-body">
         <span class="step-title">Camber — register to the wheel FACE</span>
         <span class="step-desc">Hold the phone flat against the machined wheel <strong>face</strong>, clear of the curved outer lip and any decorative or raised spokes. Wheel-face camber is <strong>not</strong> the same as tire camber — register to the same hard, flat datum on every corner so left/right deltas are comparable.</span>
+      </div>
+    </div>
+    <div class="step-item">
+      <div class="step-num">K</div>
+      <div class="step-body">
+        <span class="step-title">Caster — camber pose, two steer positions</span>
+        <span class="step-desc">Hold the phone on the wheel <strong>face exactly as for camber</strong>, but capture it twice: once with the wheel steered <strong>out</strong> by θ and once steered <strong>in</strong> by θ. Set θ with turn plates or a printable degree disc (default 20° each way). <strong>No zeroing</strong> — the camber offset cancels in the difference. Let each read <strong>settle</strong> before capturing. Front wheels only; validate the absolute sign against a known-caster reference.</span>
       </div>
     </div>
     <div class="step-item">
@@ -871,7 +882,7 @@
   <div class="instr-spacer"></div>
 </div>
 
-<script type="module" src="assets/js/app.js?v=15"></script>
+<script type="module" src="assets/js/app.js?v=16"></script>
 
 <dialog id="fixture-dialog" class="fixture-dialog" aria-labelledby="fixture-dialog-title">
   <form method="dialog" id="fixture-form" class="fixture-form">
