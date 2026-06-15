@@ -1926,10 +1926,34 @@ function setToeInput(field, value) {
   switch (field) {
     case 'units': {
       const nextUnits = value === 'in' ? 'in' : 'mm';
-      const wasDefault = !Number.isFinite(w.readUncertainty)
-        || Math.abs(w.readUncertainty - TOE_DEFAULT_READ_UNCERTAINTY[w.units]) < 1e-9;
-      w.units = nextUnits;
-      if (wasDefault) w.readUncertainty = TOE_DEFAULT_READ_UNCERTAINTY[nextUnits];
+      if (nextUnits !== w.units) {
+        const wasDefault = !Number.isFinite(w.readUncertainty)
+          || Math.abs(w.readUncertainty - TOE_DEFAULT_READ_UNCERTAINTY[w.units]) < 1e-9;
+        // Every already-entered LINEAR value is stored in the OLD unit; flipping the label without
+        // converting the numbers would silently corrupt the band, the linear equivalent, and the toe
+        // angle until each field is re-entered. Numerically convert the diameter, spec diameter, and
+        // the four gap reads (and the string-box corners) so the entered geometry is preserved. Only
+        // finite values are converted; blanks stay blank.
+        const convert = nextUnits === 'mm'
+          ? linear => (Number.isFinite(linear) ? linear * 25.4 : linear) // in -> mm
+          : linear => (Number.isFinite(linear) ? linear / 25.4 : linear); // mm -> in
+        w.units = nextUnits;
+        // readUncertainty: keep re-defaulting to the per-unit default when it was the previous
+        // default; otherwise convert the operator's custom value like any other linear quantity.
+        w.readUncertainty = wasDefault
+          ? TOE_DEFAULT_READ_UNCERTAINTY[nextUnits]
+          : convert(w.readUncertainty);
+        w.diameter = convert(w.diameter);
+        w.specDiameter = convert(w.specDiameter);
+        w.reads.forEach(read => {
+          read.front = convert(read.front);
+          read.rear = convert(read.rear);
+        });
+        SIDES.forEach(side => {
+          w.stringBox[side].front = convert(w.stringBox[side].front);
+          w.stringBox[side].rear = convert(w.stringBox[side].rear);
+        });
+      }
       break;
     }
     case 'specType':
@@ -1944,9 +1968,17 @@ function setToeInput(field, value) {
     case 'specDiameter':
       w.specDiameter = parseToeNumber(value);
       break;
-    case 'readUncertainty':
-      w.readUncertainty = parseToeNumber(value);
+    case 'readUncertainty': {
+      // The +/- band is always shown, so the read uncertainty must always be finite: a blank field
+      // would make toeReadUncertaintyDeg (and the saved toleranceDeg) null, dropping the band from a
+      // saved value and contradicting the "always show the band" rule. Re-default to the per-unit
+      // TOE_DEFAULT_READ_UNCERTAINTY when the field is cleared so a band is always computed.
+      const parsed = parseToeNumber(value);
+      w.readUncertainty = Number.isFinite(parsed) && parsed >= 0
+        ? parsed
+        : TOE_DEFAULT_READ_UNCERTAINTY[w.units];
       break;
+    }
     case 'front1': w.reads[0].front = parseToeNumber(value); break;
     case 'rear1': w.reads[0].rear = parseToeNumber(value); break;
     case 'front2': w.reads[1].front = parseToeNumber(value); break;
@@ -2286,7 +2318,13 @@ function saveCasterMeasurement() {
 // absolute SIGN of each side must still be validated against a known reference.
 function casterDeltaNote(delta) {
   if (delta === null) return 'Capture FL and FR caster to compare left vs right.';
-  return 'FL − FR caster split. Magnitudes are robust; validate each side’s sign vs a known reference.';
+  // A split smaller than the realistic per-side band (~±0.5–1°) is within measurement noise, so a
+  // small FL−FR delta should NOT be over-read as a real left-right difference. Flag that explicitly
+  // when the magnitude is under ~1° so the user does not chase a noise-level split.
+  const withinBand = Math.abs(delta) < 1
+    ? ' A split under ~1° is within the per-side band, so treat a small delta as noise, not a real L-R difference.'
+    : '';
+  return `FL − FR caster split. Magnitudes are robust; validate each side’s sign vs a known reference.${withinBand}`;
 }
 
 function measurementFor(mode, side) {
@@ -3098,7 +3136,10 @@ function savedNoteForReading(reading) {
     if (linear) parts.push(linear);
     if (reading.toeMethod === 'string-box') {
       if (Number.isFinite(reading.toeThrust)) parts.push(`thrust ${formatSigned(reading.toeThrust)}`);
-      parts.push('per-wheel (L/R split)');
+      // The SAVED per-wheel value is referenced to the geometric CENTERLINE, while the live UI coaches
+      // adjustment against the THRUST line (they differ by the thrust angle). Label the saved value
+      // centerline-ref so it is not mistaken for the thrust-referenced adjustment target.
+      parts.push('per-wheel (L/R split, centerline-ref)');
     } else {
       if (reading.toeSymmetryAssumed) parts.push('total/2 symmetry');
       parts.push(reading.toeRunoutFault
@@ -3141,28 +3182,45 @@ function specNoteForReading(reading) {
 
 function refreshWorkflowResults() {
   const readings = SIDES.map(side => measurementFor(state.mode, side));
-  const savedCount = readings.filter(Boolean).length;
   const modeLabel = MODE_LABELS[state.mode];
-  const complete = savedCount === SIDES.length;
   const baseline = baselineSummary();
   const grid = el('workflow-spec-grid');
+
+  // CASTER is a FRONT-only measurement (FL + FR are the full set; the rear pair never applies), so
+  // the "complete" count and per-corner spec cells must treat the front pair as the whole job instead
+  // of insisting on 4 saved corners. Other modes keep the full four-corner set unchanged.
+  const isCaster = state.mode === 'caster';
+  const requiredSides = isCaster ? ['FL', 'FR'] : SIDES;
+  const savedCount = requiredSides
+    .map(side => measurementFor(state.mode, side))
+    .filter(Boolean).length;
+  const complete = savedCount === requiredSides.length;
 
   el('workflow-result-title').textContent = complete
     ? `Final ${modeLabel} specs ready`
     : `${modeLabel} workflow`;
   el('workflow-result-summary').textContent = complete
-    ? 'All four corners are saved. Review calculated side values and deltas before adjusting.'
-    : `Saved ${savedCount}/4 corners. Follow the next workflow action and collect stable data before saving.`;
+    ? (isCaster
+        ? 'Both front corners are saved. Caster is front-only — review FL/FR values and the L-R split before adjusting.'
+        : 'All four corners are saved. Review calculated side values and deltas before adjusting.')
+    : (isCaster
+        ? `Saved ${savedCount}/2 front corners. Follow the next workflow action and capture a stable camber swing before saving.`
+        : `Saved ${savedCount}/4 corners. Follow the next workflow action and collect stable data before saving.`);
 
   grid.textContent = '';
   SIDES.forEach((side, index) => {
     const reading = readings[index];
+    // CASTER: the rear pair is N/A (front-only), so render RL/RR as "N/A" instead of "Pending" /
+    // "Collect when guided" — they will never be collected.
+    const rearNA = isCaster && (side === 'RL' || side === 'RR');
     const item = buildElement('div', `spec-item${reading ? ' ready' : ''}`);
     item.appendChild(buildElement('span', 'spec-label', side));
-    item.appendChild(buildElement('strong', 'spec-value', reading ? formatSigned(reading.value) : 'Pending'));
+    item.appendChild(buildElement('strong', 'spec-value', reading
+      ? formatSigned(reading.value)
+      : (rearNA ? 'N/A' : 'Pending')));
     item.appendChild(buildElement('small', 'spec-note', reading
       ? specNoteForReading(reading)
-      : 'Collect when guided'));
+      : (rearNA ? 'Caster is front-only' : 'Collect when guided')));
     grid.appendChild(item);
   });
 
@@ -3172,7 +3230,6 @@ function refreshWorkflowResults() {
   // as "Δ is 0 by assumption" instead of the misleading generic "FL − FR" — matching the
   // saved-readings card exactly. Other modes keep the literal subtraction note.
   const isToe = state.mode === 'toe';
-  const isCaster = state.mode === 'caster';
   const frontDeltaNote = frontDelta === null
     ? 'Needs FL + FR'
     : (isToe ? toeDeltaNote('FL', 'FR', frontDelta, 'front') : (isCaster ? casterDeltaNote(frontDelta) : 'FL − FR'));
@@ -3203,8 +3260,13 @@ function refreshSavedReadings() {
     button.setAttribute('aria-selected', String(button.dataset.side === state.selectedSide));
   });
 
-  const current = measurementFor(state.mode, state.selectedSide);
-  el('saved-side-title').textContent = `${MODE_LABELS[state.mode]} · ${state.selectedSide}`;
+  // CASTER saves only to FL/FR (chosen via the caster pane's side selector, state.caster.side), which
+  // can differ from the global state.selectedSide (RL/RR). Sourcing the saved-side box from
+  // state.selectedSide would show "Caster · RL · No saved reading" right after an FL caster save, so in
+  // caster mode the displayed side tracks state.caster.side. Non-caster modes keep state.selectedSide.
+  const savedSide = state.mode === 'caster' ? state.caster.side : state.selectedSide;
+  const current = measurementFor(state.mode, savedSide);
+  el('saved-side-title').textContent = `${MODE_LABELS[state.mode]} · ${savedSide}`;
   // P1-4 / Stage 5: the saved-side box leads with the value AND its 95% band as one number.
   el('saved-side-value').textContent = current ? formatValueWithBand(current.value, current.toleranceDeg) : 'No saved reading';
   el('saved-side-note').textContent = current
@@ -3272,7 +3334,9 @@ function refreshSavedReadings() {
       if (linear) metaParts.push(linear);
       if (item.toeMethod === 'string-box') {
         if (Number.isFinite(item.toeThrust)) metaParts.push(`thrust ${formatSigned(item.toeThrust)}`);
-        metaParts.push('per-wheel (L/R split)');
+        // Saved per-wheel value is CENTERLINE-referenced; the live adjustment target is thrust-ref.
+        // Label it so the stored number is not mistaken for the thrust-referenced adjustment target.
+        metaParts.push('per-wheel (L/R split, centerline-ref)');
       } else {
         if (item.toeSymmetryAssumed) metaParts.push('total/2 symmetry');
         metaParts.push(item.toeRunoutFault
@@ -3337,6 +3401,16 @@ function refreshAdvanced() {
     const meta = state.calibrationMeta[mode];
     const item = buildElement('div', 'advanced-item');
     const label = buildElement('span', 'advanced-label', MODE_LABELS[mode]);
+    // CASTER needs NO zero — it is a camber DIFFERENCE, so any constant camber offset cancels in the
+    // swing. Rendering "Not set / No stored zero yet" implies a missing calibration step that does not
+    // exist, so this row states the measurement needs no zero instead.
+    if (mode === 'caster') {
+      item.appendChild(label);
+      item.appendChild(buildElement('strong', 'advanced-value', 'N/A'));
+      item.appendChild(buildElement('span', 'saved-meta', 'No zero needed — caster is a camber difference.'));
+      list.appendChild(item);
+      return;
+    }
     const value = buildElement('strong', 'advanced-value', meta ? formatSigned(meta.offset) : 'Not set');
     const detail = buildElement('span', 'saved-meta', meta ? `Saved ${formatTime(meta.time)} • ${orientationLabel(meta.orientation)}` : 'No stored zero yet.');
 
