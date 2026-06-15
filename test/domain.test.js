@@ -10,6 +10,7 @@ import {
   camberDeg,
   casterFromCamberSwing,
   casterBandDeg,
+  casterSwingResult,
   captureSeriesStats,
   clamp,
   clampAngle,
@@ -708,6 +709,30 @@ test('normalizeMeasurement round-trips a geometric toe reading and its toe stamp
   assert.equal(normalizeMeasurement({ mode: 'level', side: 'RL', value: 0, workflow: 'bogus' }, 'NOW').workflow, 'quick');
 });
 
+test('normalizeMeasurement round-trips a caster reading and its swing stamps', () => {
+  const caster = normalizeMeasurement({
+    mode: 'caster',
+    side: 'FL',
+    value: 2.92,
+    workflow: 'caster',
+    casterSteerAngle: 20,
+    casterCamberOut: 1.0,
+    casterCamberIn: -1.0,
+    toleranceDeg: 0.4,
+  }, 'NOW');
+  // 'caster' is a known workflow now, so it is preserved (not coerced to 'quick').
+  assert.equal(caster.workflow, 'caster');
+  assert.equal(caster.casterSteerAngle, 20);
+  assert.equal(caster.casterCamberOut, 1.0);
+  assert.equal(caster.casterCamberIn, -1.0);
+  assert.equal(caster.toleranceDeg, 0.4);
+  // A non-caster reading carries null for every caster stamp.
+  const sensor = normalizeMeasurement({ mode: 'camber', side: 'FR', value: 1.0 }, 'NOW');
+  assert.equal(sensor.casterSteerAngle, null);
+  assert.equal(sensor.casterCamberOut, null);
+  assert.equal(sensor.casterCamberIn, null);
+});
+
 test('normalizeBaselinePoint coerces quality fields and defaults the time (P2-5)', () => {
   const p = normalizeBaselinePoint({ value: 0.1, confidence: 80, orientation: 'landscape' }, 'NOW');
   assert.equal(p.value, 0.1);
@@ -1057,4 +1082,53 @@ test('casterBandDeg null guards: non-finite band / steer, non-positive and sin~0
   assert.equal(casterBandDeg(0.3, 0), null);
   assert.equal(casterBandDeg(0.3, -20), null);
   assert.equal(casterBandDeg(0.3, 180), null);
+});
+
+test('poseFamilyForMode maps caster to the upright (camber) pose family', () => {
+  // Caster reuses the camber capture pose, so it must share camber's upright/portrait family.
+  assert.equal(poseFamilyForMode('caster'), 'upright');
+  assert.equal(poseFamilyForMode('caster'), poseFamilyForMode('camber'));
+  assert.equal(preferredOrientationForMode('caster'), 'portrait');
+});
+
+test('inclinationForMode caster returns the camber roll (its live reading is camber)', () => {
+  // Phone upright with a small roll; caster mode's live reading must equal camber's.
+  const g = { x: 0.5, y: -9.78, z: 0 };
+  assert.equal(inclinationForMode('caster', g), inclinationForMode('camber', g));
+  assert.ok(Number.isFinite(inclinationForMode('caster', g)));
+});
+
+test('casterSwingResult composes the swing + band when both captures exist', () => {
+  const res = casterSwingResult({ camberOut: 1.0, camberIn: -1.0, steerAngleDeg: 20, camberBandOut: 0.3, camberBandIn: 0.2 });
+  assert.equal(res.ready, true);
+  // Matches the pure swing math (~2.924 for a 2° swing at 20°).
+  assert.ok(Math.abs(res.caster - casterFromCamberSwing(1.0, -1.0, 20)) < 1e-12);
+  // The band uses the WORST per-read band (0.3 here), not the smaller one.
+  assert.ok(Math.abs(res.toleranceDeg - casterBandDeg(0.3, 20)) < 1e-12);
+  assert.equal(res.hasOut, true);
+  assert.equal(res.hasIn, true);
+});
+
+test('casterSwingResult self-calibrates: a constant camber offset cancels (no zeroing needed)', () => {
+  const clean = casterSwingResult({ camberOut: 1.2, camberIn: -0.4, steerAngleDeg: 18 });
+  const offset = 3.7;
+  const shifted = casterSwingResult({ camberOut: 1.2 + offset, camberIn: -0.4 + offset, steerAngleDeg: 18 });
+  assert.ok(Math.abs(clean.caster - shifted.caster) < 1e-12);
+});
+
+test('casterSwingResult is not ready until both captures and a valid steer angle exist', () => {
+  assert.equal(casterSwingResult({ camberOut: null, camberIn: null }).ready, false);
+  assert.equal(casterSwingResult({ camberOut: 1.0, camberIn: null }).ready, false);
+  assert.equal(casterSwingResult({ camberOut: null, camberIn: -1.0 }).ready, false);
+  assert.equal(casterSwingResult({ camberOut: 1.0, camberIn: -1.0, steerAngleDeg: 0 }).ready, false);
+  // The hasOut/hasIn flags track which captures are present so the UI can guide the next step.
+  const oneSide = casterSwingResult({ camberOut: 1.0, camberIn: null });
+  assert.equal(oneSide.hasOut, true);
+  assert.equal(oneSide.hasIn, false);
+});
+
+test('casterSwingResult band falls back to 0 (best case) when no per-read bands are supplied', () => {
+  const res = casterSwingResult({ camberOut: 0.8, camberIn: -0.6, steerAngleDeg: 20 });
+  assert.equal(res.ready, true);
+  assert.equal(res.toleranceDeg, 0);
 });

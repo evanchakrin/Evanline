@@ -961,6 +961,29 @@
       align-items: end;
     }
     .toe-save-side { min-width: 0; }
+    /* CASTER (camber-swing) pane: two settled camber captures, a result chip, and a save row.
+       Reuses the toe-result chip grid + button styling so it matches the rest of the workflows. */
+    .caster-captures,
+    .caster-result {
+      width: 100%;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .caster-result { grid-template-columns: 1fr; }
+    .caster-capture-row {
+      width: 100%;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .caster-save-row {
+      width: 100%;
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) auto;
+      gap: 10px;
+      align-items: end;
+    }
     /* PRECISION string-box per-wheel + thrust section (precision toe path). */
     .toe-stringbox summary {
       color: var(--accent);
@@ -1009,6 +1032,12 @@
       .toe-result,
       .toe-stringbox-grid { grid-template-columns: 1fr; }
       .toe-save-row { grid-template-columns: 1fr; }
+      /* CASTER: stack the capture chips/buttons/save row when space is tight. */
+      .caster-captures,
+      .caster-capture-row,
+      .caster-save-row { grid-template-columns: 1fr; }
+      /* 5 mode tabs need a touch less horizontal padding/size to fit a narrow phone. */
+      .mode-tab { padding: 9px 4px; font-size: 12px; }
     }
 
     .instr-header { padding-bottom: 20px; }

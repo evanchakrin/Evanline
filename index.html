@@ -92,6 +92,7 @@
     <button class="mode-tab active" data-mode="level" data-action="setMode" data-arg="level" role="tab" aria-selected="true">Level</button>
     <button class="mode-tab" data-mode="camber" data-action="setMode" data-arg="camber" role="tab" aria-selected="false">Camber</button>
     <button class="mode-tab" data-mode="toe" data-action="setMode" data-arg="toe" role="tab" aria-selected="false" title="Toe is a guided geometric calculation, not a sensor reading">Toe (geometric)</button>
+    <button class="mode-tab" data-mode="caster" data-action="setMode" data-arg="caster" role="tab" aria-selected="false" title="Caster is recovered from how camber changes between two steer positions">Caster</button>
     <button class="mode-tab" data-mode="pitch" data-action="setMode" data-arg="pitch" role="tab" aria-selected="false">Pitch</button>
   </div>
 
@@ -138,6 +139,11 @@
     <span class="gauge-label">Geometric toe wizard</span>
     <div class="guide-step">Measure toe geometrically</div>
     <p class="guide-text">A phone cannot sense toe. Enter measured rim/plate gaps and the app is the calculator + uncertainty engine. Toe-in is positive. Target accuracy ~0.1–0.3°.</p>
+
+    <div class="mode-explainer" role="note">
+      <strong>Why not phone-only sensor toe?</strong>
+      <span>Toe is a yaw (rotation about vertical) measurement. A phone's yaw drifts without a magnetometer reference, and a magnetometer is unreliable next to a steel body. iOS Safari also has no ARKit/WebXR for drift-free tracking. So Evanline measures toe geometrically instead — the method below is accurate and repeatable.</span>
+    </div>
 
     <div class="mode-explainer" role="note">
       <strong>Runout is the dominant error.</strong>
@@ -371,6 +377,67 @@
         <div class="control-hint">Saves each corner's per-wheel toe to FL/FR/RL/RR with the ± band and the thrust/linear context — no symmetry assumption.</div>
       </div>
     </details>
+  </div>
+
+  <div class="gauge-card caster-card hidden-panel" id="caster-card">
+    <span class="gauge-label">Caster (camber swing)</span>
+    <div class="guide-step">Measure caster from a camber swing</div>
+    <p class="guide-text">Caster is not a static reading — it is recovered from how camber changes as the wheel is steered. Hold the phone flush to the wheel face (same as camber), steer a known angle each way, and capture camber at both positions. caster = (camber<sub>out</sub> − camber<sub>in</sub>) / (2 · sin θ). Honest accuracy ~±0.5–1°.</p>
+
+    <div class="mode-explainer" role="note">
+      <strong>No zeroing needed.</strong>
+      <span>Caster is a DIFFERENCE of two camber reads, so any camber zero offset cancels — capture RAW camber at both steer positions. Use turn plates with degree markings (or a printable degree disc) to set the steer angle each way.</span>
+    </div>
+
+    <div class="toe-field-grid">
+      <label class="toe-field">
+        <span>Steer angle each way θ</span>
+        <input class="form-input" type="number" inputmode="decimal" step="any" min="0" id="caster-steer-angle" data-action="casterInput" data-arg="steerAngle" placeholder="20" />
+        <small>Steer from straight-ahead on EACH side (total swing = 2θ). Use turn plates / a printable degree disc. Classic value 20°.</small>
+      </label>
+      <label class="toe-field">
+        <span>Front side</span>
+        <select class="form-select" id="caster-side" data-action="casterInput" data-arg="side">
+          <option value="FL">FL (front left)</option>
+          <option value="FR">FR (front right)</option>
+        </select>
+        <small>Caster is a front-wheel measurement.</small>
+      </label>
+    </div>
+
+    <div class="caster-captures">
+      <div class="status-chip">
+        <span class="status-chip-label">Camber steered OUT</span>
+        <span class="status-chip-value" id="caster-out-value">—</span>
+        <span class="status-chip-sub" id="caster-out-sub">Steer out, settle, then capture.</span>
+      </div>
+      <div class="status-chip">
+        <span class="status-chip-label">Camber steered IN</span>
+        <span class="status-chip-value" id="caster-in-value">—</span>
+        <span class="status-chip-sub" id="caster-in-sub">Steer in, settle, then capture.</span>
+      </div>
+    </div>
+
+    <div class="caster-capture-row">
+      <button class="btn btn-primary btn-small" id="btn-caster-capture-out" data-action="captureCasterOut">Capture steered OUT</button>
+      <button class="btn btn-primary btn-small" id="btn-caster-capture-in" data-action="captureCasterIn">Capture steered IN</button>
+    </div>
+
+    <div class="caster-result">
+      <div class="status-chip">
+        <span class="status-chip-label">Caster</span>
+        <span class="status-chip-value" id="caster-result-value">—</span>
+        <span class="status-chip-sub" id="caster-result-sub">Capture both steer positions to compute.</span>
+      </div>
+    </div>
+
+    <div class="warning-text" id="caster-verdict" role="status" aria-live="polite">Capture camber steered OUT and steered IN to compute caster.</div>
+
+    <div class="caster-save-row">
+      <button class="btn btn-primary btn-small" id="btn-save-caster" data-action="saveCaster">Save caster</button>
+      <button class="btn btn-surface btn-small" id="btn-reset-caster" data-action="resetCaster">Reset captures</button>
+    </div>
+    <div class="control-hint">Positive caster = top of the steering axis tilted rearward. SIGN CAVEAT: the magnitude is robust, but validate the absolute sign against a known-caster reference.</div>
   </div>
 
   <div class="gauge-card precision-card hidden-panel" id="precision-card">
