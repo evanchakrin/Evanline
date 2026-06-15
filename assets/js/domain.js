@@ -483,6 +483,76 @@ export function flipSelfTest(firstReading, secondReading, tolerance = 0.2) {
   };
 }
 
+// --- GEOMETRIC TOE -----------------------------------------------------------------------------
+// A phone cannot SENSE toe (rotation about vertical relative to the vehicle centerline; a gravity
+// inclinometer is blind to it, and compass/gyro/camera fail on physics or platform). The honest,
+// accurate path is GEOMETRIC measurement: the phone is the calculator + procedure coach +
+// uncertainty-band engine. These helpers are PURE and use NO sensors — toe is plain atan arithmetic
+// from user-entered measurements. Target accuracy ~0.1-0.3 deg. All angles are in DEGREES and use
+// the exact atan (never a small-angle approximation). SIGN CONVENTION: TOE-IN is POSITIVE.
+
+// Per-wheel toe from a front-vs-rear offset measured over a reference diameter/length D (e.g. rim
+// diameter or plate height): theta = atan((rear - front) / D). rear - front > 0 means the wheel's
+// leading/front edge is nearer the vehicle centerline than the trailing edge => TOE-IN => POSITIVE.
+// Returns null on non-finite inputs or diameter <= 0 (output scales as 1/D, so D must be positive).
+export function toeAngleFromOffset(rear, front, diameter) {
+  if (!Number.isFinite(rear) || !Number.isFinite(front) || !Number.isFinite(diameter) || diameter <= 0) return null;
+  return Math.atan((rear - front) / diameter) * 180 / Math.PI;
+}
+
+// TOTAL axle toe directly from a pair of plates/tapes: total = atan((rearSpan - frontSpan) /
+// plateSpan), where rearSpan (R) is the distance between the two plates measured at the REAR of the
+// front tires, frontSpan (F) at the FRONT, and plateSpan (S) is the plate span/height between those
+// two reads. Toe-in (R > F) is positive. Returns null on non-finite inputs or plateSpan <= 0.
+export function totalToeFromPlates(rearSpan, frontSpan, plateSpan) {
+  if (!Number.isFinite(rearSpan) || !Number.isFinite(frontSpan) || !Number.isFinite(plateSpan) || plateSpan <= 0) return null;
+  return Math.atan((rearSpan - frontSpan) / plateSpan) * 180 / Math.PI;
+}
+
+// Symmetry-assumption helper: split a TOTAL axle toe into per-wheel toe assuming left-right
+// symmetry. Plates alone cannot split L vs R, so the UI must FLAG this as an assumption. Returns
+// null when totalToe is non-finite.
+export function perWheelFromTotal(totalToe) {
+  if (!Number.isFinite(totalToe)) return null;
+  return totalToe / 2;
+}
+
+// Thrust angle from the rear-axle per-wheel toe values: thrust = (toeRL - toeRR) / 2. Positive =>
+// the thrust line points to the LEFT. Front per-wheel toe referenced to the geometric centerline is
+// corrected to thrust-referenced by subtracting the thrust angle (sign per side) at the call site.
+// Returns null when either rear toe is non-finite.
+export function thrustAngle(toeRL, toeRR) {
+  if (!Number.isFinite(toeRL) || !Number.isFinite(toeRR)) return null;
+  return (toeRL - toeRR) / 2;
+}
+
+// Convert an angular toe to its LINEAR equivalent at a quoted spec diameter: linear =
+// specDiameter * tan(angleDeg). Always pair a linear toe with the diameter it assumes. Returns null
+// on non-finite inputs or specDiameter <= 0.
+export function toeAngleToLinear(angleDeg, specDiameter) {
+  if (!Number.isFinite(angleDeg) || !Number.isFinite(specDiameter) || specDiameter <= 0) return null;
+  return specDiameter * Math.tan(angleDeg * Math.PI / 180);
+}
+
+// Inverse of toeAngleToLinear: angle = atan(linear / specDiameter) in degrees. Returns null on
+// non-finite inputs or specDiameter <= 0. Self-check: atan(1/28.648) ~= 1.999 deg ("1 inch = 2
+// degrees"); atan(1/381) ~= 0.150 deg (1 mm on a 15 in wheel).
+export function linearToToeAngle(linear, specDiameter) {
+  if (!Number.isFinite(linear) || !Number.isFinite(specDiameter) || specDiameter <= 0) return null;
+  return Math.atan(linear / specDiameter) * 180 / Math.PI;
+}
+
+// Propagated +/- band half-width (DEGREES) for a toe read. A linear read uncertainty u (default
+// 0.8 mm = 1/32 in, supply in the SAME units as `diameter`) propagates as dtheta ~= u / D radians.
+// For a DIFFERENTIAL of two reads (a front and a rear measurement, as every toe read is) multiply
+// by sqrt(2). Reported with coverage factor k = 2 (~95%), matching the app's existing tolerance
+// band. Returns null on non-finite inputs or diameter <= 0.
+export function toeReadUncertaintyDeg(readUncertainty, diameter, differential = true) {
+  if (!Number.isFinite(readUncertainty) || !Number.isFinite(diameter) || diameter <= 0) return null;
+  const factor = differential ? Math.SQRT2 : 1;
+  return 2 * (readUncertainty / diameter) * factor * 180 / Math.PI;
+}
+
 // P2-2: canonical planar (x, y) positions of the four corners in a unit square centred on the
 // origin. x grows to the right (L -> R), y grows to the front (R -> F). Used to fit a plane to
 // the four Level-mode corner heights so the baseline is a real least-squares plane, not a pair

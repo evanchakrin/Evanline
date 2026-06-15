@@ -33,7 +33,14 @@ import {
   preferredOrientationForMode,
   scaleGainFromReference,
   standardDeviation,
+  toeAngleFromOffset,
+  toeAngleToLinear,
+  toeReadUncertaintyDeg,
   toleranceHalfWidth,
+  totalToeFromPlates,
+  perWheelFromTotal,
+  thrustAngle,
+  linearToToeAngle,
 } from '../assets/js/domain.js';
 
 // Shared baseline inputs for computeSampleQuality so each test overrides just the field
@@ -666,4 +673,104 @@ test('normalizeBaselinePoint coerces quality fields and defaults the time (P2-5)
   const bare = normalizeBaselinePoint({ value: 0.2 }, 'NOW');
   assert.equal(bare.confidence, 0);
   assert.equal(bare.orientation, 'portrait');
+});
+
+// --- GEOMETRIC TOE: pure math + uncertainty -----------------------------------------------------
+
+test('toeAngleFromOffset hits the self-check constants and is toe-in positive', () => {
+  // Self-check: "1 inch = 2 degrees" rule. atan(1 / 28.648 in) ~= 1.999 deg.
+  assert.ok(Math.abs(toeAngleFromOffset(1, 0, 28.648) - 1.999) < 1e-3);
+  // Self-check: 1 mm offset on a 15 in (381 mm) wheel ~= 0.150 deg.
+  assert.ok(Math.abs(toeAngleFromOffset(1, 0, 381) - 0.150) < 1e-3);
+  // Toe-in sign: rear edge wider than front (rear > front) => POSITIVE.
+  assert.ok(toeAngleFromOffset(2, 1, 28.648) > 0);
+  // Toe-out: rear < front => NEGATIVE.
+  assert.ok(toeAngleFromOffset(1, 2, 28.648) < 0);
+  // Equal front/rear is exactly zero toe.
+  assert.equal(toeAngleFromOffset(1.5, 1.5, 28.648), 0);
+  // 1/D scaling: doubling the reference diameter halves the angle for the same offset (small-offset
+  // limit where atan is near-linear, so the 1/D relation is clean; atan's curvature only shows at
+  // larger ratios).
+  const small = toeAngleFromOffset(0.01, 0, 14);
+  const big = toeAngleFromOffset(0.01, 0, 28);
+  assert.ok(Math.abs(small - 2 * big) < 1e-6);
+  // Null guards: non-finite inputs and non-positive diameter.
+  assert.equal(toeAngleFromOffset(NaN, 0, 28.648), null);
+  assert.equal(toeAngleFromOffset(1, NaN, 28.648), null);
+  assert.equal(toeAngleFromOffset(1, 0, 0), null);
+  assert.equal(toeAngleFromOffset(1, 0, -10), null);
+});
+
+test('totalToeFromPlates gives total axle toe with toe-in positive', () => {
+  // R (rear gap) > F (front gap) => toe-in => positive. 1 in over a 28.648 in plate span = 1.999 deg.
+  assert.ok(Math.abs(totalToeFromPlates(1, 0, 28.648) - 1.999) < 1e-3);
+  // R < F => toe-out => negative.
+  assert.ok(totalToeFromPlates(0, 1, 28.648) < 0);
+  // Equal spans => zero total toe.
+  assert.equal(totalToeFromPlates(2, 2, 28.648), 0);
+  // Null guards.
+  assert.equal(totalToeFromPlates(NaN, 0, 28.648), null);
+  assert.equal(totalToeFromPlates(1, 0, 0), null);
+  assert.equal(totalToeFromPlates(1, 0, -5), null);
+});
+
+test('perWheelFromTotal splits total toe under the symmetry assumption', () => {
+  assert.equal(perWheelFromTotal(2.0), 1.0);
+  assert.equal(perWheelFromTotal(-0.3), -0.15);
+  assert.equal(perWheelFromTotal(0), 0);
+  assert.equal(perWheelFromTotal(NaN), null);
+});
+
+test('thrustAngle is half the rear left-right toe difference (+ points left)', () => {
+  // RL toe-in more than RR => thrust line points left => positive.
+  assert.equal(thrustAngle(0.4, 0.2), 0.1);
+  // Symmetric rear toe => zero thrust.
+  assert.equal(thrustAngle(0.3, 0.3), 0);
+  // RR greater => negative (points right).
+  assert.equal(thrustAngle(0.1, 0.5), -0.2);
+  assert.equal(thrustAngle(NaN, 0.2), null);
+  assert.equal(thrustAngle(0.4, NaN), null);
+});
+
+test('toeAngleToLinear and linearToToeAngle round-trip and hit the self-check constants', () => {
+  // Self-check: 1.999 deg on a 28.648 in spec diameter is ~1 inch of linear toe.
+  assert.ok(Math.abs(toeAngleToLinear(1.999, 28.648) - 1) < 1e-3);
+  // Inverse: atan(1 / 28.648) ~= 1.999 deg ("1 inch = 2 degrees").
+  assert.ok(Math.abs(linearToToeAngle(1, 28.648) - 1.999) < 1e-3);
+  // Inverse: 1 mm on a 15 in (381 mm) wheel ~= 0.150 deg.
+  assert.ok(Math.abs(linearToToeAngle(1, 381) - 0.150) < 1e-3);
+  // Round-trip angle -> linear -> angle.
+  const angle = 0.42;
+  const linear = toeAngleToLinear(angle, 30);
+  assert.ok(Math.abs(linearToToeAngle(linear, 30) - angle) < 1e-9);
+  // Sign is preserved through both directions.
+  assert.ok(toeAngleToLinear(-0.5, 30) < 0);
+  assert.ok(linearToToeAngle(-1, 30) < 0);
+  // Null guards on both helpers.
+  assert.equal(toeAngleToLinear(NaN, 30), null);
+  assert.equal(toeAngleToLinear(1, 0), null);
+  assert.equal(toeAngleToLinear(1, -30), null);
+  assert.equal(linearToToeAngle(NaN, 30), null);
+  assert.equal(linearToToeAngle(1, 0), null);
+  assert.equal(linearToToeAngle(1, -30), null);
+});
+
+test('toeReadUncertaintyDeg propagates u/D with sqrt(2) for the differential and k=2', () => {
+  // Differential default: 2 * (0.8 / 381) * sqrt(2) * 180/PI for a 0.8 mm read on a 15 in wheel.
+  const expected = 2 * (0.8 / 381) * Math.SQRT2 * 180 / Math.PI;
+  assert.ok(Math.abs(toeReadUncertaintyDeg(0.8, 381) - expected) < 1e-12);
+  // The differential band is exactly sqrt(2) times the single-read band.
+  const diff = toeReadUncertaintyDeg(0.8, 381, true);
+  const single = toeReadUncertaintyDeg(0.8, 381, false);
+  assert.ok(Math.abs(diff / single - Math.SQRT2) < 1e-12);
+  // 1/D scaling: doubling the diameter halves the band.
+  const small = toeReadUncertaintyDeg(0.8, 200);
+  const big = toeReadUncertaintyDeg(0.8, 400);
+  assert.ok(Math.abs(small - 2 * big) < 1e-12);
+  // Band is always positive for a positive read uncertainty.
+  assert.ok(toeReadUncertaintyDeg(0.8, 381) > 0);
+  // Null guards.
+  assert.equal(toeReadUncertaintyDeg(NaN, 381), null);
+  assert.equal(toeReadUncertaintyDeg(0.8, 0), null);
+  assert.equal(toeReadUncertaintyDeg(0.8, -381), null);
 });
