@@ -1128,10 +1128,20 @@ test('casterSwingResult is not ready until both captures and a valid steer angle
   assert.equal(oneSide.hasIn, false);
 });
 
-test('casterSwingResult band falls back to 0 (best case) when no per-read bands are supplied', () => {
+test('casterSwingResult band is null (unknown) when no per-read bands are supplied', () => {
+  // With NO per-read camber bands the propagated band is UNKNOWN, not a perfect ±0 — returning null
+  // makes the UI show "±—" rather than a falsely tight "±0.00 (95%)".
   const res = casterSwingResult({ camberOut: 0.8, camberIn: -0.6, steerAngleDeg: 20 });
   assert.equal(res.ready, true);
-  assert.equal(res.toleranceDeg, 0);
+  assert.equal(res.toleranceDeg, null);
+});
+
+test('casterSwingResult still computes a band when at least one per-read band is supplied', () => {
+  // A single supplied band drives the read-noise term (the other falls back to it), so the band is
+  // finite and matches casterBandDeg of that band.
+  const res = casterSwingResult({ camberOut: 0.8, camberIn: -0.6, steerAngleDeg: 20, camberBandIn: 0.25 });
+  assert.equal(res.ready, true);
+  assert.ok(Math.abs(res.toleranceDeg - casterBandDeg(0.25, 20)) < 1e-12);
 });
 
 test('casterPersistedBandDeg floors the propagated read-noise band at the realistic accuracy', () => {

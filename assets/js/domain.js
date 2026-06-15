@@ -992,10 +992,14 @@ export function casterSwingResult({
     return { ready: false, caster: null, toleranceDeg: null, reason: 'Caster is undefined for this steer angle.', hasOut, hasIn };
   }
   // The read-noise band scales with the per-read camber band; take the worst of the two captures so
-  // a noisier read drives the propagated band. Missing bands fall back to 0 (best-case).
+  // a noisier read drives the propagated band. When NEITHER capture carries a band the propagated
+  // band is UNKNOWN (not a perfect ±0), so return null — the UI then shows "±—" instead of a falsely
+  // tight "±0.00 (95%)". A band is only computed when at least one per-read band is supplied.
   const bands = [camberBandOut, camberBandIn].filter(Number.isFinite).map(Math.abs);
-  const camberBand = bands.length ? Math.max(...bands) : 0;
-  const toleranceDeg = casterBandDeg(camberBand, steerAngleDeg, steerAngleUncertaintyDeg);
+  const camberBand = bands.length ? Math.max(...bands) : null;
+  const toleranceDeg = camberBand === null
+    ? null
+    : casterBandDeg(camberBand, steerAngleDeg, steerAngleUncertaintyDeg);
   return {
     ready: true,
     caster,
