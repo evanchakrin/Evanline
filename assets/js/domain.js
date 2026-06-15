@@ -888,3 +888,58 @@ export function headingTrust({
   }
   return { trusted: false, heading: null, accuracy: null, reason: 'relative' };
 }
+
+// --- CASTER (turning-angle / camber-swing method) ----------------------------------------------
+// Caster is NOT readable from a single static gravity reading, but it is recoverable from how the
+// CAMBER changes as the wheel is steered. Steer the wheel a known angle each way and read the
+// existing gravity CAMBER (camberDeg / the settling pipeline, phone flush against the wheel face)
+// at each steer position. These helpers are PURE — they take the two camber numbers the sensor
+// pipeline already produced and turn them into a caster angle + uncertainty band.
+//
+// FORMULA: caster = (camberOut - camberIn) / (2 * sin(steerAngleDeg)), where steerAngleDeg is the
+// steer angle from straight-ahead on EACH side (total swing = 2*steerAngleDeg). camberOut is the
+// camber with the wheel steered OUTWARD, camberIn the camber steered INWARD. The classic 20° each
+// way gives 2*sin(20°) = 0.6840, so a 2° camber swing reads ~2.924° of caster.
+//
+// SELF-CALIBRATION: caster is a DIFFERENCE of two camber reads, so any constant camber zero offset
+// CANCELS in the subtraction. Caster therefore needs NO zeroing step — capture RAW camber at both
+// positions and the offset drops out.
+//
+// SIGN CAVEAT: positive caster = top of the steering axis tilted rearward. The out/in and per-side
+// (FL vs FR) sign convention depends on which way "outward" steer rotates the wheel face relative to
+// the phone; the MAGNITUDE is robust, but the absolute SIGN should be validated against a known-
+// caster reference before trusting it. See casterBandDeg for the uncertainty.
+export function casterFromCamberSwing(camberOut, camberIn, steerAngleDeg) {
+  if (!Number.isFinite(camberOut) || !Number.isFinite(camberIn) || !Number.isFinite(steerAngleDeg)) return null;
+  if (steerAngleDeg <= 0) return null;
+  const sinTheta = Math.sin(degToRad(steerAngleDeg));
+  if (!(Math.abs(sinTheta) > 1e-9)) return null;
+  return (camberOut - camberIn) / (2 * sinTheta);
+}
+
+// Propagated +/- band (DEGREES) for a caster read. Two terms combine in quadrature:
+//   1. READ-NOISE term: each camber read carries a +/- band camberBandDeg; the caster is a
+//      DIFFERENCE of two such reads divided by 2*sin(theta), so the band scales by
+//      camberBandDeg * sqrt(2) / (2*sin(theta)). At 20° this is camberBandDeg * 1.414 / 0.684 ~=
+//      2.07x — the caster band is ~2x the per-read camber band.
+//   2. TURN-ANGLE term: a steer-angle error d(theta) scales caster by ~ -cot(theta) * d(theta)
+//      (a few % per degree at 20°). Without the caster magnitude we cannot size the absolute
+//      degrees this contributes, so it is folded in RELATIVE to the read-noise term: it inflates
+//      the band by the fractional turn-angle sensitivity cot(theta) * d(theta_rad). This keeps the
+//      helper dependency-free (no caster value needed) while still surfacing turn-angle sensitivity.
+// Returns null on non-finite camberBandDeg / steerAngleDeg, steerAngleDeg <= 0, or sin ~ 0. The
+// turn-angle uncertainty defaults to 0 (read-noise only). REALISTIC accuracy ~ +/-0.5 to 1°.
+export function casterBandDeg(camberBandDeg, steerAngleDeg, steerAngleUncertaintyDeg = 0) {
+  if (!Number.isFinite(camberBandDeg) || !Number.isFinite(steerAngleDeg)) return null;
+  if (steerAngleDeg <= 0) return null;
+  const theta = degToRad(steerAngleDeg);
+  const sinTheta = Math.sin(theta);
+  if (!(Math.abs(sinTheta) > 1e-9)) return null;
+  // Read-noise term: the dominant, caster-value-independent uncertainty.
+  const readTerm = Math.abs(camberBandDeg) * Math.SQRT2 / (2 * sinTheta);
+  // Turn-angle term: fractional sensitivity cot(theta) * d(theta) applied to the read-noise term.
+  const dTheta = Number.isFinite(steerAngleUncertaintyDeg) ? Math.abs(degToRad(steerAngleUncertaintyDeg)) : 0;
+  const cotTheta = Math.cos(theta) / sinTheta;
+  const turnTerm = readTerm * Math.abs(cotTheta) * dTheta;
+  return Math.hypot(readTerm, turnTerm);
+}

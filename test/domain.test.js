@@ -8,6 +8,8 @@ import {
   buildArcPath,
   calibrationZeroValid,
   camberDeg,
+  casterFromCamberSwing,
+  casterBandDeg,
   captureSeriesStats,
   clamp,
   clampAngle,
@@ -971,4 +973,88 @@ test('computeToeStringBoxResult omits the linear equivalent without a spec diame
   assert.equal(res.ready, true);
   assert.equal(res.specDiameter, null);
   assert.equal(res.perWheelLinear.FL, null);
+});
+
+// --- CASTER: turning-angle / camber-swing math + uncertainty ------------------------------------
+
+test('casterFromCamberSwing recovers caster from a known camber swing at 20 deg', () => {
+  // Self-check: camberOut=+1.0, camberIn=-1.0, theta=20 => 2.0 / (2*sin20) = 2.0 / 0.6840 ~= 2.924.
+  assert.ok(Math.abs(casterFromCamberSwing(1.0, -1.0, 20) - 2.924) < 1e-3);
+  // The divisor is exactly 2*sin(20deg) ~= 0.6840: a 1.0 deg swing reads 1/0.6840 ~= 1.462.
+  assert.ok(Math.abs(2 * Math.sin(20 * Math.PI / 180) - 0.6840) < 1e-4);
+  assert.ok(Math.abs(casterFromCamberSwing(0.5, -0.5, 20) - (1.0 / 0.6840)) < 1e-3);
+});
+
+test('casterFromCamberSwing sign: out > in is positive, out < in is negative, equal is zero', () => {
+  // camberOut > camberIn => positive caster.
+  assert.ok(casterFromCamberSwing(1.0, -1.0, 20) > 0);
+  assert.ok(casterFromCamberSwing(0.5, 0.2, 20) > 0);
+  // camberOut < camberIn => negative caster.
+  assert.ok(casterFromCamberSwing(-1.0, 1.0, 20) < 0);
+  // No swing => exactly zero caster (the constant camber offset cancels).
+  assert.equal(casterFromCamberSwing(0.3, 0.3, 20), 0);
+});
+
+test('casterFromCamberSwing self-calibrates: a constant camber offset cancels', () => {
+  const theta = 18;
+  const out = 0.8;
+  const inn = -0.6;
+  const offset = 1.37; // any constant zero-offset present in BOTH raw camber reads
+  const clean = casterFromCamberSwing(out, inn, theta);
+  const offsetted = casterFromCamberSwing(out + offset, inn + offset, theta);
+  // The subtraction removes the offset, so caster is identical with or without zeroing.
+  assert.ok(Math.abs(clean - offsetted) < 1e-12);
+});
+
+test('casterFromCamberSwing scales with 1/(2 sin theta)', () => {
+  // A larger steer angle for the SAME camber swing yields a SMALLER caster (bigger divisor).
+  const swingSmallTheta = casterFromCamberSwing(1.0, -1.0, 10);
+  const swingBigTheta = casterFromCamberSwing(1.0, -1.0, 30);
+  assert.ok(swingSmallTheta > swingBigTheta);
+  // Matches the closed form exactly.
+  assert.ok(Math.abs(casterFromCamberSwing(1.0, -1.0, 10) - (2.0 / (2 * Math.sin(10 * Math.PI / 180)))) < 1e-12);
+});
+
+test('casterFromCamberSwing null guards: non-finite inputs and non-positive / sin~0 steer angle', () => {
+  assert.equal(casterFromCamberSwing(NaN, -1.0, 20), null);
+  assert.equal(casterFromCamberSwing(1.0, NaN, 20), null);
+  assert.equal(casterFromCamberSwing(1.0, -1.0, NaN), null);
+  assert.equal(casterFromCamberSwing(1.0, -1.0, 0), null);
+  assert.equal(casterFromCamberSwing(1.0, -1.0, -20), null);
+  // theta = 180 deg => sin ~ 0 => guarded (would divide by ~0).
+  assert.equal(casterFromCamberSwing(1.0, -1.0, 180), null);
+});
+
+test('casterBandDeg scales the camber read band by sqrt(2)/(2 sin theta) (~2x at 20 deg)', () => {
+  const camberBand = 0.3;
+  const readTerm = camberBand * Math.SQRT2 / (2 * Math.sin(20 * Math.PI / 180));
+  // With no turn-angle uncertainty the band IS the read-noise term.
+  assert.ok(Math.abs(casterBandDeg(camberBand, 20) - readTerm) < 1e-12);
+  // The multiplier at 20deg is sqrt(2)/(2 sin20) ~= 1.414/0.684 ~= 2.067, i.e. ~2x the camber band.
+  const ratio = casterBandDeg(camberBand, 20) / camberBand;
+  assert.ok(Math.abs(ratio - 2.0671) < 1e-3);
+  assert.ok(ratio > 2);
+});
+
+test('casterBandDeg folds in a turn-angle uncertainty term in quadrature', () => {
+  const camberBand = 0.3;
+  const noTurn = casterBandDeg(camberBand, 20, 0);
+  const withTurn = casterBandDeg(camberBand, 20, 1);
+  // A non-zero steer-angle uncertainty only ever GROWS the band (added in quadrature).
+  assert.ok(withTurn > noTurn);
+  // It matches the closed form: hypot(readTerm, readTerm * |cot(theta)| * d(theta_rad)).
+  const theta = 20 * Math.PI / 180;
+  const readTerm = camberBand * Math.SQRT2 / (2 * Math.sin(theta));
+  const turnTerm = readTerm * Math.abs(Math.cos(theta) / Math.sin(theta)) * (1 * Math.PI / 180);
+  assert.ok(Math.abs(withTurn - Math.hypot(readTerm, turnTerm)) < 1e-12);
+  // A negative band / negative steer uncertainty is treated by magnitude (always non-negative band).
+  assert.ok(casterBandDeg(-0.3, 20, -1) > 0);
+});
+
+test('casterBandDeg null guards: non-finite band / steer, non-positive and sin~0 steer angle', () => {
+  assert.equal(casterBandDeg(NaN, 20), null);
+  assert.equal(casterBandDeg(0.3, NaN), null);
+  assert.equal(casterBandDeg(0.3, 0), null);
+  assert.equal(casterBandDeg(0.3, -20), null);
+  assert.equal(casterBandDeg(0.3, 180), null);
 });
